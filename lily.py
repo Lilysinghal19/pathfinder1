@@ -127,11 +127,34 @@ n=int(input("enter a number"))
 sum=0
 for i in range(1,n+1):
     sum=sum+i
+print(sum)
+num=int(input("enter a number"))
+for i in range (num,0,-1):
+    print (i)
+num=int(input("enter a number"))
+sum=0
+while(num>0):
+    last_digit=num%10
+    sum+=last_digit
+    num=num//10
+print(sum)
+
+num=int(input("enter a number"))
+sum=0
+while(num>0):
+    if num%2!=0:
+        last_digit=num%10
+        sum+=last_digit
+    num=num//10
 print(sum)"""
-n=int(input("enter a number"))
-for i in range(1,n+1):
-    print(i)
-   
+
+
+
+
+
+
+
+
         
 
 

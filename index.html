@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>AI Career Voice Assistant</title>
+<script src="https://cdn.jsdelivr.net/npm/livekit-client/dist/livekit-client.umd.min.js"></script>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font-family: 'Segoe UI', sans-serif;
+  background: linear-gradient(135deg, #eef2ff, #f0fdf4);
+  min-height: 100vh;
+  display: flex; flex-direction: column;
+  align-items: center; padding: 40px 16px;
+}
+h1 { color: #1e1b4b; font-size: 24px; margin-bottom: 6px; }
+.sub { color: #64748b; font-size: 14px; margin-bottom: 32px; }
+
+@keyframes pulse {
+  0%,100% { box-shadow: 0 0 0 0 rgba(239,68,68,.5); transform: scale(1); }
+  60%      { box-shadow: 0 0 0 20px rgba(239,68,68,0); transform: scale(1.06); }
+}
+@keyframes bar { 0%,100%{height:5px} 50%{height:24px} }
+
+#orb {
+  width: 96px; height: 96px; border-radius: 50%; border: none;
+  font-size: 38px; cursor: pointer;
+  background: linear-gradient(135deg, #2E5BFF, #4F46E5); color: #fff;
+  box-shadow: 0 8px 28px rgba(79,70,229,.35);
+  transition: transform .15s; margin-bottom: 16px;
+  display: flex; align-items: center; justify-content: center;
+}
+#orb:hover { transform: scale(1.08); }
+#orb.listening { background: #ef4444; animation: pulse 1.4s infinite; }
+#orb.thinking  { background: #f59e0b; }
+#orb.speaking  { background: #16a34a; }
+#orb.disabled  { background: #9ca3af; cursor: default; }
+
+.wave { display: flex; align-items: center; gap: 4px; height: 30px;
+        justify-content: center; visibility: hidden; margin-bottom: 12px; }
+.wave.show { visibility: visible; }
+.wave span { display: inline-block; width: 4px; border-radius: 3px;
+  background: linear-gradient(#7c3aed, #4f46e5);
+  animation: bar .85s ease-in-out infinite; }
+.wave span:nth-child(2){animation-delay:.12s}
+.wave span:nth-child(3){animation-delay:.24s}
+.wave span:nth-child(4){animation-delay:.36s}
+.wave span:nth-child(5){animation-delay:.48s}
+
+#status {
+  font-size: 15px; font-weight: 600; color: #334155;
+  min-height: 24px; margin-bottom: 20px; text-align: center;
+}
+
+#setup {
+  background: #fff; border: 1px solid #e2e8f0; border-radius: 16px;
+  padding: 24px; width: 100%; max-width: 480px; margin-bottom: 24px;
+}
+#setup h3 { color: #1e1b4b; margin-bottom: 14px; font-size: 15px; }
+.field { margin-bottom: 12px; }
+.field label { display: block; font-size: 12px; font-weight: 600;
+               color: #64748b; margin-bottom: 4px; }
+.field input { width: 100%; padding: 9px 12px; border-radius: 8px;
+               border: 1px solid #e2e8f0; font-size: 13px; }
+#connectBtn {
+  width: 100%; padding: 11px; border-radius: 10px; border: none;
+  background: linear-gradient(135deg, #2E5BFF, #4F46E5); color: #fff;
+  font-weight: 700; font-size: 14px; cursor: pointer;
+}
+#connectBtn:hover { opacity: .92; }
+
+#conv {
+  width: 100%; max-width: 560px; display: flex; flex-direction: column;
+  gap: 10px; max-height: 380px; overflow-y: auto;
+  border: 1px solid #e2e8f0; border-radius: 14px;
+  padding: 16px; background: #fff;
+}
+.bu { background: #ede9fe; color: #3730a3;
+      border-radius: 18px 18px 4px 18px;
+      padding: 11px 15px; max-width: 82%; font-size: 14px; align-self: flex-end; }
+.ba { background: #f0fdf4; color: #166534;
+      border-left: 4px solid #16a34a;
+      border-radius: 4px 18px 18px 18px;
+      padding: 11px 15px; max-width: 82%; font-size: 14px; align-self: flex-start; }
+.tip { font-size: 12px; color: #94a3b8; margin-top: 14px; }
+</style>
+</head>
+<body>
+
+<h1>AI Career Voice Assistant</h1>
+<p class="sub">Powered by LiveKit WebRTC</p>
+
+<!-- Step 1: connect form -->
+<div id="setup">
+  <h3>Connect to your LiveKit room</h3>
+  <div class="field">
+    <label>LiveKit URL (from your .env.local)</label>
+    <input id="lkUrl" placeholder="wss://your-project.livekit.cloud" />
+  </div>
+  <div class="field">
+    <label>Access Token (generate with: python token.py)</label>
+    <input id="lkToken" placeholder="eyJ..." />
+  </div>
+  <button id="connectBtn" onclick="connect()">Connect & Start</button>
+</div>
+
+<!-- Step 2: voice UI (hidden until connected) -->
+<div id="voiceUI" style="display:none; flex-direction:column; align-items:center; width:100%;">
+  <button id="orb" class="disabled" disabled>MIC</button>
+  <div class="wave" id="wave">
+    <span></span><span></span><span></span><span></span><span></span>
+  </div>
+  <div id="status">Connecting...</div>
+  <div id="conv"></div>
+  <p class="tip">The agent speaks first. Then click MIC to talk. Click again to stop.</p>
+</div>
+
+<script>
+var room = null;
+var connected = false;
+var micTrack  = null;
+
+function ST(t)   { document.getElementById("status").textContent = t; }
+function ORB(cls){ var o=document.getElementById("orb"); o.className=cls; }
+function WAVE(v) { document.getElementById("wave").classList.toggle("show",v); }
+function bubble(role, text) {
+  var d = document.createElement("div");
+  d.className = (role === "user") ? "bu" : "ba";
+  d.textContent = ((role==="user") ? "You: " : "AI: ") + text;
+  var c = document.getElementById("conv");
+  c.appendChild(d); c.scrollTop = c.scrollHeight;
+}
+
+async function connect() {
+  var url   = document.getElementById("lkUrl").value.trim();
+  var token = document.getElementById("lkToken").value.trim();
+  if(!url || !token) { alert("Please fill in both fields."); return; }
+
+  document.getElementById("setup").style.display    = "none";
+  document.getElementById("voiceUI").style.display  = "flex";
+  ST("Connecting to LiveKit...");
+
+  room = new LivekitClient.Room({
+    adaptiveStream: true,
+    dynacast: true,
+    audioCaptureDefaults: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+  });
+
+  // ── Room events ──────────────────────────────────────────
+  room.on(LivekitClient.RoomEvent.Connected, function() {
+    ST("Connected! Waiting for agent...");
+    console.log("Room connected");
+  });
+
+  room.on(LivekitClient.RoomEvent.Disconnected, function() {
+    ST("Disconnected. Refresh to reconnect.");
+    ORB("disabled"); connected = false;
+    document.getElementById("orb").disabled = true;
+  });
+
+  // Agent audio track — plays automatically
+  room.on(LivekitClient.RoomEvent.TrackSubscribed, function(track, pub, participant) {
+    console.log("Track subscribed:", track.kind, "from", participant.identity);
+    if(track.kind === "audio") {
+      var el = track.attach();
+      el.autoplay = true;
+      document.body.appendChild(el);
+      if(participant.identity !== room.localParticipant.identity) {
+        WAVE(true);
+        ST("Agent speaking...");
+        ORB("speaking");
+      }
+    }
+  });
+
+  room.on(LivekitClient.RoomEvent.TrackUnsubscribed, function(track) {
+    track.detach();
+    WAVE(false);
+    if(connected){ ST("Listening — click MIC to speak"); ORB("listening"); }
+  });
+
+  // Data messages from agent (transcripts)
+  room.on(LivekitClient.RoomEvent.DataReceived, function(data, participant) {
+    try {
+      var msg = JSON.parse(new TextDecoder().decode(data));
+      if(msg.type === "transcript" && msg.text) bubble("user", msg.text);
+      if(msg.type === "response"   && msg.text) bubble("assistant", msg.text);
+    } catch(e) {}
+  });
+
+  // Participant joined (agent)
+  room.on(LivekitClient.RoomEvent.ParticipantConnected, function(p) {
+    console.log("Participant joined:", p.identity);
+    ST("Agent joined! Click MIC to speak.");
+    ORB("listening");
+    document.getElementById("orb").disabled = false;
+    connected = true;
+  });
+
+  try {
+    await room.connect(url, token);
+  } catch(e) {
+    ST("Connection failed: " + e.message);
+    console.error(e);
+    return;
+  }
+}
+
+document.getElementById("orb").addEventListener("click", async function() {
+  if(!connected) return;
+
+  if(!micTrack) {
+    // Start mic
+    try {
+      await room.localParticipant.setMicrophoneEnabled(true);
+      micTrack = room.localParticipant.getTrackPublication(LivekitClient.Track.Source.Microphone);
+      ORB("listening");
+      ST("Listening... click MIC again when done speaking.");
+    } catch(e) {
+      ST("Mic error: " + e.message);
+    }
+  } else {
+    // Stop mic → agent processes
+    await room.localParticipant.setMicrophoneEnabled(false);
+    micTrack = null;
+    ORB("thinking");
+    ST("Processing...");
+  }
+});
+</script>
+</body>
+</html>

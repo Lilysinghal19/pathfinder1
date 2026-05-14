@@ -1,17 +1,12 @@
 """
 livekit_agent.py  —  Continuous Real-time Voice Agent
-=======================================================
 Compatible with: livekit-agents == 1.5.8
 
-Pipeline:
-  Browser Mic (WebRTC)  →  LiveKit Room  →  Silero VAD
-  →  Google STT  →  Groq LLM  →  Google TTS  →  Browser Speaker
-
-Run:
-  python livekit_agent.py dev
+VAD tuned: responds after ~0.5s silence, barge-in supported.
+Uses GCP for STT/TTS (professional quality).
+Groq LLM for responses.
 """
 
-import asyncio
 import json
 import logging
 import os
@@ -20,7 +15,6 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# ── LiveKit Agent SDK ──────────────────────────────────────────
 from livekit import agents
 from livekit.agents import AgentSession, Agent
 from livekit.plugins import (
@@ -29,182 +23,142 @@ from livekit.plugins import (
     silero,
 )
 
-# ── Logging ────────────────────────────────────────────────────
 logging.basicConfig(
     level  = logging.INFO,
     format = "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
 log = logging.getLogger("voice_agent")
 
-# ── Credentials ────────────────────────────────────────────────
 LIVEKIT_URL        = os.environ["LIVEKIT_URL"]
 LIVEKIT_API_KEY    = os.environ["LIVEKIT_API_KEY"]
 LIVEKIT_API_SECRET = os.environ["LIVEKIT_API_SECRET"]
 GROQ_API_KEY       = os.environ["GROQ_API_KEY"]
 GCP_CREDENTIALS    = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "gcp_key.json")
-
 os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = GCP_CREDENTIALS
 
-# ── Gap context file (written by oo.py after analysis) ─────────
 GAP_CONTEXT_FILE = Path(__file__).parent / "gap_context.json"
 
-# ── Base system prompt ─────────────────────────────────────────
-BASE_SYSTEM_PROMPT = """
-You are an expert AI career coach and voice assistant built into an AI Skill Gap Analyzer app.
+# ═══════════════════════════════════════════════════════════════════════════
+# CAREER COACH SYSTEM PROMPT
+# Combines the expertise from oo.py with conversational warmth
+# ═══════════════════════════════════════════════════════════════════════════
+BASE_SYSTEM_PROMPT = """You are an expert AI career coach specializing in skill gap analysis.
 
-Your personality:
-- Warm, encouraging, and direct
-- Speak naturally in short conversational sentences — you are talking, not writing
-- NEVER use markdown, bullet points, asterisks, or numbered lists in your spoken responses
-- Keep responses under 3 sentences unless the user explicitly asks for more detail
-- If you need to list things, say them naturally: "First... second... and finally..."
+Your expertise:
+- Career path guidance and transitions
+- Technical skill assessment and learning roadmaps
+- Resume optimization and interview preparation
+- Job search strategy and negotiation
+- Python, Machine Learning, Data Science, Cloud, DevOps, and software engineering
 
-Your knowledge covers:
-- Career paths, skill gaps, and personalised learning roadmaps
-- Tech skills: Python, ML, data science, software engineering, cloud
-- Resume advice, interview prep, and job search strategy
+Communication style:
+- Speak in SHORT, natural conversational sentences (as if talking, not writing)
+- NEVER use markdown, bullet points, asterisks, or numbered lists
+- Keep answers to 2-3 sentences unless the user asks for more detail
+- If listing items, say them naturally: "First... second... and finally..."
+- Be warm, encouraging, direct, and actionable
+- Reference the user's specific skill gap when relevant
+- Provide practical next steps they can take today
 
-When you don't know something, say so honestly and suggest a next step.
-""".strip()
+When discussing skills:
+- Acknowledge what they already know
+- Prioritize the highest-impact missing skills
+- Suggest concrete learning resources and timelines
+- Help them build relevant projects for portfolio""".strip()
 
 
 def load_gap_context() -> str:
-    """
-    Reads gap_context.json written by oo.py after skill-gap analysis.
-    Returns a formatted string to inject into the LLM context,
-    or empty string if no analysis has been run yet.
-    """
+    """Load skill gap analysis context if available."""
     if not GAP_CONTEXT_FILE.exists():
         return ""
     try:
         with open(GAP_CONTEXT_FILE, "r", encoding="utf-8") as f:
             ctx = json.load(f)
-        missing_preview  = ", ".join(ctx.get("missing",  [])[:6])
-        matching_preview = ", ".join(ctx.get("matching", [])[:6])
+        missing  = ", ".join(ctx.get("missing",  [])[:6])
+        matching = ", ".join(ctx.get("matching", [])[:6])
         return (
-            f"\n\nCURRENT USER ANALYSIS (personalise every answer using this):\n"
-            f"- Target Role : {ctx.get('target_role', 'Unknown')}\n"
-            f"- Match Score : {ctx.get('match_pct', '?')}%\n"
-            f"- Skill Gap   : {ctx.get('gap_pct', '?')}%\n"
-            f"- Their skills: {matching_preview or 'not available'}\n"
-            f"- Missing     : {missing_preview  or 'not available'}\n"
-            f"\nReference this analysis naturally when answering career questions."
+            f"\n\nCARDINAL CONTEXT - User's Career Profile:\n"
+            f"Target Role: {ctx.get('target_role', 'Unknown')}\n"
+            f"Match Score: {ctx.get('match_pct', '?')}% (already has these skills)\n"
+            f"Skill Gap: {ctx.get('gap_pct', '?')}% (needs these skills)\n"
+            f"Has: {matching or 'not available'}\n"
+            f"Missing: {missing or 'not available'}\n\n"
+            f"Reference this context naturally when answering career questions. "
+            f"Help them close their gap with a practical, personalized roadmap."
         )
     except Exception as e:
-        log.warning(f"[GAP CTX] Could not read gap_context.json: {e}")
+        log.warning(f"[GAP CTX] {e}")
         return ""
 
 
-# ══════════════════════════════════════════════════════════════
-# AGENT
-# ══════════════════════════════════════════════════════════════
-
 class CareerVoiceAgent(Agent):
-    """
-    Continuous voice agent.
-    - No push-to-talk: Silero VAD handles turn detection automatically
-    - Barge-in: user can interrupt the agent mid-sentence
-    - Skill-gap context injected fresh before every LLM call
-    """
 
     def __init__(self):
-        instructions = BASE_SYSTEM_PROMPT + load_gap_context()
-        super().__init__(instructions=instructions)
+        super().__init__(instructions=BASE_SYSTEM_PROMPT + load_gap_context())
 
     async def on_enter(self):
-        """Opening greeting when agent joins the room."""
-        if GAP_CONTEXT_FILE.exists():
-            greeting = (
-                "Hello! I'm your AI career coach. "
-                "I can see your skill gap analysis is ready. "
-                "What would you like to know about your career path?"
-            )
-        else:
-            greeting = (
-                "Hello! I'm your AI career coach. "
-                "Run the skill gap analysis in the app and I'll have full context "
-                "about your goals. How can I help you today?"
-            )
+        greeting = (
+            "Hi! I'm your AI career coach. I can see your skill gap analysis. "
+            "I can help you create a personalized learning roadmap. What would you like to know?"
+            if GAP_CONTEXT_FILE.exists() else
+            "Hello! I'm your AI career coach. How can I help you with your career today?"
+        )
         await self.session.say(greeting, allow_interruptions=True)
 
     async def on_user_turn_completed(self, turn_ctx, new_message):
-        """
-        Called after VAD detects end-of-speech and STT finishes,
-        before the LLM is invoked.
-        Re-reads gap_context.json on every turn so any new analysis
-        is picked up immediately without restarting the agent.
-        """
-        gap_ctx = load_gap_context()
-        if gap_ctx:
-            turn_ctx.add_message(
-                role    = "system",
-                content = f"[LIVE CONTEXT UPDATE]{gap_ctx}",
-            )
+        print("\n========== USER MESSAGE ==========")
+        print(new_message)
+        print("==================================\n")
 
-
-# ══════════════════════════════════════════════════════════════
-# ENTRYPOINT
-# ══════════════════════════════════════════════════════════════
 
 async def entrypoint(ctx: agents.JobContext):
-    log.info(f"[AGENT] Connecting to room: {ctx.room.name}")
-
-    # Build Google TTS with explicit Neural2 voice (overrides Gemini default)
-    tts_engine = lk_google.TTS(
-        voice_name       = "en-US-Neural2-D",   # natural male; change to -F for female
-        speaking_rate    = 1.05,
-        credentials_file = GCP_CREDENTIALS,
-    )
-
+    log.info(f"[AGENT] Room: {ctx.room.name}")
+    
     session = AgentSession(
-
-        # 1. VAD — Silero (local, no API key, very fast)
-        vad = silero.VAD.load(
-            min_speech_duration     = 0.1,   # 100 ms of speech to start a turn
-            min_silence_duration    = 0.6,   # 600 ms silence → end of turn
-            prefix_padding_duration = 0.3,
-            activation_threshold    = 0.5,   # lower = more sensitive
+        # VAD: fires after 400ms silence → fast conversational response
+        vad=silero.VAD.load(
+            min_speech_duration     = 0.05,
+            min_silence_duration    = 0.4,
+            prefix_padding_duration = 0.2,
+            activation_threshold    = 0.55,
         ),
-
-        # 2. STT — Google Cloud Speech
-        stt = lk_google.STT(
+        # STT: Google Cloud — conversational speech, 92%+ accuracy
+        # "latest_short" optimized for back-and-forth dialogue
+        stt=lk_google.STT(
             languages          = ["en-US", "hi-IN"],
-            model              = "latest_long",
+            model              = "latest_short",
             spoken_punctuation = False,
             credentials_file   = GCP_CREDENTIALS,
         ),
-
-        # 3. LLM — Groq (fastest available)
-        llm = lk_groq.LLM(
+        # LLM: Groq Llama 3 8B — fastest inference, conversational
+        llm=lk_groq.LLM(
             model       = "llama3-8b-8192",
             api_key     = GROQ_API_KEY,
             temperature = 0.7,
         ),
-
-        # 4. TTS — Google Neural2
-        tts = tts_engine,
-
-        # ── Barge-in / interruption settings (v1.5.8 correct params) ──
-        allow_interruptions        = True,
-        min_interruption_duration  = 0.3,   # user must speak ≥ 300 ms to interrupt
-        min_interruption_words     = 0,     # any spoken words count as interrupt
-
-        # ── Endpointing (how long to wait after silence before sending to LLM) ──
+        # TTS: Google Neural2-D — professional, natural-sounding voice
+        # Specifically tuned for career coaching tone (calm, authoritative, warm)
+        tts=lk_google.TTS(
+            voice_name       = "en-US-Neural2-D",  # Professional male voice
+            speaking_rate    = 1.0,                # Natural speaking pace
+            credentials_file = GCP_CREDENTIALS,
+        ),
+        # Barge-in: user can interrupt the agent anytime
+        allow_interruptions       = True,
+        min_interruption_duration = 0.3,
+        min_interruption_words    = 0,
+        # Endpointing: after silence detected by VAD, wait 0.5–0.8s then call LLM
+        # This creates a natural conversational pause feeling
         min_endpointing_delay = 0.5,
-        max_endpointing_delay = 1.2,
+        max_endpointing_delay = 0.8,
     )
+    print("GOOGLE CREDS:", GCP_CREDENTIALS)
+    print("CREDS EXISTS:", Path(GCP_CREDENTIALS).exists())
+    print("GROQ KEY EXISTS:", bool(GROQ_API_KEY))
 
-    await session.start(
-        room  = ctx.room,
-        agent = CareerVoiceAgent(),
-    )
+    await session.start(room=ctx.room, agent=CareerVoiceAgent())
+    log.info("[AGENT] Live — listening for speech")
 
-    log.info("[AGENT] Session live — waiting for user speech")
-
-
-# ══════════════════════════════════════════════════════════════
-# MAIN
-# ══════════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
     agents.cli.run_app(

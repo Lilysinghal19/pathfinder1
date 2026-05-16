@@ -8,7 +8,7 @@ FastAPI server that:
 Run alongside livekit_agent.py:
     python token_server.py
 
-Open in browser: http://localhost:7880
+Open in browser: http://localhost:8080
 """
 
 import datetime
@@ -26,6 +26,13 @@ from livekit.api import AccessToken, VideoGrants
 
 load_dotenv()
 
+_missing_vars = [v for v in ["LIVEKIT_URL","LIVEKIT_API_KEY","LIVEKIT_API_SECRET"]
+                 if not os.environ.get(v)]
+if _missing_vars:
+    raise RuntimeError(
+        f"Missing .env vars: {_missing_vars}\n"
+        f"Create a .env file with LIVEKIT_URL, LIVEKIT_API_KEY, LIVEKIT_API_SECRET"
+    )
 LIVEKIT_URL        = os.environ["LIVEKIT_URL"]
 LIVEKIT_API_KEY    = os.environ["LIVEKIT_API_KEY"]
 LIVEKIT_API_SECRET = os.environ["LIVEKIT_API_SECRET"]
@@ -97,11 +104,11 @@ async def root():
 
 if __name__ == "__main__":
     print("\n✅  Token server ready.")
-    print("🌐  Open: http://localhost:7880\n")
+    print("🌐  Open: http://localhost:8080\n")
     uvicorn.run(
         "token_server:app",
         host      = "127.0.0.1",
-        port      = 7880,
+        port      = 8080,
         reload    = True,
         log_level = "info",
     )

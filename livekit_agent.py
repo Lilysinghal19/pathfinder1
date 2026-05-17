@@ -1,256 +1,252 @@
 """
-livekit_agent.py  —  AI Career Voice Agent
-============================================
-livekit-agents == 1.5.8  |  livekit-plugins-google == 1.5.9
+livekit_agent.py -- AI Career Voice Agent
+==========================================
+livekit-agents == 1.5.8 | livekit-plugins-google == 1.5.9
 
-Fixes applied:
-  BUG 1: Port conflict — agent uses LiveKit Cloud, no local port needed here
-  BUG 2: Vertex AI model string corrected to "gemini-2.5-flash" (no "google/" prefix)
-  BUG 3: turn_ctx.add_message() IS correct in v1.5.8 (ChatContext has it) — kept
-  BUG 4: Startup crash on missing .env — all vars now use get() with clear error msgs
+Run:
+    python livekit_agent.py dev
 
-Auth: single gcp_key.json for STT + LLM (Vertex) + TTS
+To test on LiveKit Playground:
+    1. Go to https://cloud.livekit.io -> your project -> Agents
+    2. Click "Test in Playground" next to your registered worker
+    3. The agent auto-dispatches (agent_name="" means automatic dispatch)
+
+Auth: single gcp_key.json for STT + LLM (Vertex AI) + TTS
 """
 
 import json
 import logging
 import os
+import sys
 from pathlib import Path
 
 from dotenv import load_dotenv
 load_dotenv()
 
-# ── MUST set these BEFORE importing any livekit/google plugins ────────
+# -- Set Vertex AI env vars BEFORE any google/livekit imports -----------
 os.environ["GOOGLE_GENAI_USE_VERTEXAI"] = "1"
 
 GCP_CREDENTIALS = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "gcp_key.json")
 os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = GCP_CREDENTIALS
 
-# ── Auto-read project_id from gcp_key.json if not set in .env ────────
+# Auto-read project_id from gcp_key.json
 if not os.environ.get("GOOGLE_CLOUD_PROJECT"):
     try:
         with open(GCP_CREDENTIALS) as _f:
             _proj = json.load(_f).get("project_id", "")
         if not _proj:
-            raise ValueError(f"'project_id' field missing in {GCP_CREDENTIALS}")
+            raise ValueError("project_id field missing in " + GCP_CREDENTIALS)
         os.environ["GOOGLE_CLOUD_PROJECT"] = _proj
-        print(f"[BOOT] Auto-set GOOGLE_CLOUD_PROJECT={_proj} from {GCP_CREDENTIALS}")
+        sys.stdout.write("[BOOT] GOOGLE_CLOUD_PROJECT=" + _proj + "\n")
+        sys.stdout.flush()
     except FileNotFoundError:
-        raise RuntimeError(
-            f"\n[BOOT] ERROR: GCP key file not found: '{GCP_CREDENTIALS}'\n"
-            f"  → Make sure gcp_key.json is in: {Path(GCP_CREDENTIALS).absolute()}\n"
-            f"  → Or set GOOGLE_APPLICATION_CREDENTIALS=/full/path/to/key.json in .env"
+        sys.stderr.write(
+            "[BOOT] ERROR: GCP key file not found: " + GCP_CREDENTIALS + "\n"
+            "  Set GOOGLE_APPLICATION_CREDENTIALS in .env to the correct path.\n"
         )
+        sys.exit(1)
     except Exception as e:
-        raise RuntimeError(f"[BOOT] Cannot read GCP project from key file: {e}")
+        sys.stderr.write("[BOOT] ERROR reading GCP key: " + str(e) + "\n")
+        sys.exit(1)
 
 if not os.environ.get("GOOGLE_CLOUD_LOCATION"):
     os.environ["GOOGLE_CLOUD_LOCATION"] = "us-central1"
 
-# ── BUG 4 FIX: Validate LiveKit vars with clear messages, not KeyError ─
-_missing = [v for v in ["LIVEKIT_URL","LIVEKIT_API_KEY","LIVEKIT_API_SECRET"]
+# Validate LiveKit env vars before importing anything
+_missing = [v for v in ["LIVEKIT_URL", "LIVEKIT_API_KEY", "LIVEKIT_API_SECRET"]
             if not os.environ.get(v)]
 if _missing:
-    raise RuntimeError(
-        f"\n[BOOT] ERROR: Missing required env vars: {_missing}\n"
-        f"  → Create a .env file in your project folder with:\n"
-        f"    LIVEKIT_URL=wss://your-project.livekit.cloud\n"
-        f"    LIVEKIT_API_KEY=APIxxxxxxxxx\n"
-        f"    LIVEKIT_API_SECRET=xxxxxxxxxx\n"
-        f"  → Get these from https://cloud.livekit.io → Settings → Keys"
+    sys.stderr.write(
+        "[BOOT] ERROR: Missing env vars: " + str(_missing) + "\n"
+        "  Add them to your .env file.\n"
     )
+    sys.exit(1)
 
-# ── Now safe to import ────────────────────────────────────────────────
+# -- Safe to import now -------------------------------------------------
 from livekit import agents
 from livekit.agents import AgentSession, Agent
 from livekit.plugins import google as lk_google, silero
 
 logging.basicConfig(
-    level  = logging.INFO,
-    format = "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
 log = logging.getLogger("career_agent")
 
-log.info("=== STARTUP CONFIG ===")
-log.info("  GCP credentials : %s → %s",
-         GCP_CREDENTIALS, "EXISTS ✓" if Path(GCP_CREDENTIALS).exists() else "MISSING ✗")
-log.info("  GCP project     : %s", os.environ.get("GOOGLE_CLOUD_PROJECT"))
-log.info("  GCP location    : %s", os.environ.get("GOOGLE_CLOUD_LOCATION"))
-log.info("  Vertex AI mode  : %s", os.environ.get("GOOGLE_GENAI_USE_VERTEXAI"))
-log.info("  LiveKit URL     : %s", os.environ.get("LIVEKIT_URL"))
+log.info("=== STARTUP ===")
+log.info("  GCP creds file : %s (%s)",
+         GCP_CREDENTIALS,
+         "found" if Path(GCP_CREDENTIALS).exists() else "NOT FOUND - will fail")
+log.info("  GCP project    : %s", os.environ.get("GOOGLE_CLOUD_PROJECT"))
+log.info("  GCP location   : %s", os.environ.get("GOOGLE_CLOUD_LOCATION"))
+log.info("  Vertex AI mode : %s", os.environ.get("GOOGLE_GENAI_USE_VERTEXAI"))
+log.info("  LiveKit URL    : %s", os.environ.get("LIVEKIT_URL"))
 
-# ── Gap context file written by oo.py ────────────────────────────────
 GAP_FILE = Path(__file__).parent / "gap_context.json"
 
-# ── System prompt ─────────────────────────────────────────────────────
-BASE_PROMPT = """You are an expert AI career coach embedded inside an AI Skill Gap Analyzer.
-
-Your persona:
-- Warm, direct, and encouraging
-- Speak in short natural sentences — you are talking aloud, not writing
-- NEVER use markdown, bullet points, asterisks, or numbered lists
-- Keep answers under 3 sentences unless explicitly asked for more
-- If you must list things, say them naturally: "First... second... and finally..."
-
-Your expertise:
-- Career path planning and skill gap analysis
-- Python, ML, data science, deep learning, NLP, cloud, DevOps, software engineering
-- Resume advice, interview preparation, job search strategy
-- Learning roadmaps and resource recommendations
-
-Coaching style:
-- Always refer to the user's actual skill gap data when it is available
-- Be specific — name the actual missing skills, not generic advice
-- Give one clear next step at the end of every answer
-
-You are on a voice call. Never produce text the user would need to read.
-Speak like a real career mentor on a phone call.""".strip()
+BASE_PROMPT = (
+    "You are an expert AI career coach embedded inside an AI Skill Gap Analyzer.\n\n"
+    "Rules:\n"
+    "- Speak in short natural sentences. You are talking aloud, not writing.\n"
+    "- NEVER use markdown, bullet points, asterisks, or numbered lists.\n"
+    "- Keep answers under 3 sentences unless asked for more.\n"
+    "- List things naturally: First... second... and finally...\n"
+    "- Be warm, direct, and encouraging.\n\n"
+    "Expertise: career paths, skill gaps, learning roadmaps, Python, ML, "
+    "data science, deep learning, NLP, cloud, DevOps, resume advice, "
+    "interview prep, job search strategy.\n\n"
+    "Always refer to the user's actual skill gap data when available. "
+    "Name specific missing skills. Give one clear next step per answer.\n\n"
+    "You are on a voice call. Speak like a real career mentor on a phone call."
+)
 
 
-def load_gap_context() -> str:
-    """Read gap_context.json written by oo.py after skill gap analysis."""
+def load_gap_context():
     if not GAP_FILE.exists():
         return ""
     try:
         with open(GAP_FILE, encoding="utf-8") as f:
             ctx = json.load(f)
-        parts = [
+        lines = [
             "\n\n--- USER SKILL GAP ANALYSIS ---",
-            f"Target Role : {ctx.get('target_role', 'Unknown')}",
-            f"Match Score : {ctx.get('match_pct', '?')}%",
-            f"Gap Score   : {ctx.get('gap_pct', '?')}%",
-            f"Has skills  : {', '.join(ctx.get('matching',[])[:8]) or 'none listed'}",
-            f"Missing     : {', '.join(ctx.get('missing', [])[:8]) or 'none listed'}",
+            "Target Role : " + str(ctx.get("target_role", "Unknown")),
+            "Match Score : " + str(ctx.get("match_pct", "?")) + "%",
+            "Gap Score   : " + str(ctx.get("gap_pct", "?")) + "%",
+            "Has skills  : " + (", ".join(ctx.get("matching", [])[:8]) or "none listed"),
+            "Missing     : " + (", ".join(ctx.get("missing",  [])[:8]) or "none listed"),
         ]
         if ctx.get("ai_insight"):
-            parts.append(f"AI Insight  : {ctx['ai_insight'][:400]}")
-        parts.append("\nReference this data naturally when advising.")
-        return "\n".join(parts)
+            lines.append("AI Insight  : " + ctx["ai_insight"][:400])
+        lines.append("\nReference this data. Name actual missing skills when advising.")
+        return "\n".join(lines)
     except Exception as e:
-        log.warning("[GAP] Could not load context: %s", e)
+        log.warning("[GAP] %s", e)
         return ""
 
 
-# ═════════════════════════════════════════════════════════════════════
+# ======================================================================
 # AGENT
-# ═════════════════════════════════════════════════════════════════════
+# ======================================================================
 
 class CareerVoiceAgent(Agent):
 
     def __init__(self):
         super().__init__(instructions=BASE_PROMPT + load_gap_context())
-        log.info("[AGENT] Gap context: %s", "loaded ✓" if GAP_FILE.exists() else "none yet")
+        log.info("[AGENT] Gap context: %s",
+                 "loaded" if GAP_FILE.exists() else "not yet available")
 
     async def on_enter(self):
-        greeting = (
-            "Hello! I'm your AI career coach. I can see your skill gap analysis. "
-            "What would you like to know about your career path?"
-            if GAP_FILE.exists() else
-            "Hello! I'm your AI career coach. How can I help you today?"
-        )
-        log.info("[AGENT] Sending greeting")
+        if GAP_FILE.exists():
+            greeting = (
+                "Hello! I'm your AI career coach. "
+                "I can see your skill gap analysis is ready. "
+                "What would you like to know about your career path?"
+            )
+        else:
+            greeting = (
+                "Hello! I'm your AI career coach. "
+                "How can I help you with your career today?"
+            )
+        log.info("[AGENT] Sending greeting...")
         await self.session.say(greeting, allow_interruptions=True)
 
-    async def on_user_turn_completed(
-        self,
-        turn_ctx,       # llm.ChatContext  — the full chat context for this turn
-        new_message,    # llm.ChatMessage  — the user's transcribed message
-    ) -> None:
+    async def on_user_turn_completed(self, turn_ctx, new_message):
         """
-        Called AFTER STT finishes, BEFORE LLM is invoked.
-        Re-read gap_context.json every turn so new analyses are
-        picked up immediately without restarting the agent.
-
-        BUG 3 CLARIFICATION:
-        turn_ctx here IS a llm.ChatContext instance.
-        ChatContext.add_message(role=..., content=...) is the correct v1.5.8 API.
-        Verified from source: livekit/agents/llm/chat_context.py line 417.
+        Called after STT finishes, before LLM is called.
+        Injects fresh gap context on every turn.
+        turn_ctx is a llm.ChatContext instance.
+        ChatContext.add_message(role, content) is verified correct in v1.5.8
+        from livekit/agents/llm/chat_context.py line 417.
         """
         ctx = load_gap_context()
         if ctx:
             turn_ctx.add_message(
-                role    = "system",
-                content = "[LIVE CONTEXT — use for this answer only]" + ctx,
+                role="system",
+                content="[LIVE CONTEXT - use for this answer only]" + ctx,
             )
-            log.debug("[AGENT] Gap context injected into turn")
 
 
-# ═════════════════════════════════════════════════════════════════════
+# ======================================================================
 # ENTRYPOINT
-# ═════════════════════════════════════════════════════════════════════
+# ======================================================================
 
 async def entrypoint(job_ctx: agents.JobContext):
-    log.info("[AGENT] Job received — room: %s", job_ctx.room.name)
+    log.info("[AGENT] Job received - room: %s", job_ctx.room.name)
 
     try:
-        # CRITICAL: await connect() before using room tracks
+        # CRITICAL: must call connect() before accessing room media
         await job_ctx.connect()
-        log.info("[AGENT] Room connected ✓")
+        log.info("[AGENT] Room connected")
 
         session = AgentSession(
 
-            # ── VAD: Silero (local, zero latency) ─────────────────────
+            # VAD: Silero (local, zero latency, no API key)
             vad=silero.VAD.load(
-                min_speech_duration     = 0.05,   # 50ms voice → turn start
-                min_silence_duration    = 0.45,   # 450ms quiet → turn end
-                prefix_padding_duration = 0.2,
-                activation_threshold    = 0.55,
+                min_speech_duration=0.05,
+                min_silence_duration=0.45,
+                prefix_padding_duration=0.2,
+                activation_threshold=0.55,
             ),
 
-            # ── STT: Google Cloud Speech-to-Text ──────────────────────
+            # STT: Google Cloud Speech-to-Text
+            # credentials_file uses the service account JSON
             stt=lk_google.STT(
-                languages          = ["en-US", "hi-IN"],
-                model              = "latest_short",  # fast conversational model
-                spoken_punctuation = False,
-                credentials_file   = GCP_CREDENTIALS,
+                languages=["en-US", "hi-IN"],
+                model="latest_short",
+                spoken_punctuation=False,
+                credentials_file=GCP_CREDENTIALS,
             ),
 
-            # ── LLM: Gemini 2.5 Flash via Vertex AI ───────────────────
-            # BUG 2 FIX: model = "gemini-2.5-flash"  (NOT "google/gemini-2.5-flash")
-            # "google/" prefix is only for AI Studio API, not Vertex AI.
+            # LLM: Gemini 2.5 Flash via Vertex AI
             # vertexai=True reads GOOGLE_CLOUD_PROJECT + GOOGLE_APPLICATION_CREDENTIALS
-            # automatically — no api_key needed.
+            # model string is just "gemini-2.5-flash" -- no "google/" prefix
             llm=lk_google.LLM(
-                model       = "gemini-2.5-flash",   # ← correct Vertex AI model string
-                vertexai    = True,                  # ← enables Vertex AI auth
-                temperature = 0.7,
+                model="gemini-2.5-flash",
+                vertexai=True,
+                temperature=0.7,
             ),
 
-            # ── TTS: Google Cloud Text-to-Speech ──────────────────────
+            # TTS: Google Cloud Text-to-Speech
             tts=lk_google.TTS(
-                voice_name       = "en-US-Neural2-D",   # male; use -F for female
-                speaking_rate    = 1.05,
-                credentials_file = GCP_CREDENTIALS,
+                voice_name="en-US-Neural2-D",
+                speaking_rate=1.05,
+                credentials_file=GCP_CREDENTIALS,
             ),
 
-            # ── Turn handling ─────────────────────────────────────────
+            # Turn handling -- typed dict format, verified from turn.py source
+            # EndpointingOptions keys: mode, min_delay, max_delay
+            # InterruptionOptions keys: enabled, mode
             turn_handling={
                 "endpointing": {
-                    "min_delay": 0.5,   # wait 500ms after silence → call LLM
-                    "max_delay": 0.8,   # never wait longer than 800ms
+                    "mode":      "fixed",
+                    "min_delay": 0.5,
+                    "max_delay": 0.8,
                 },
                 "interruption": {
-                    "enabled":      True,
-                    "min_duration": 0.3,  # 300ms of speech = interrupt
-                    "min_words":    0,
+                    "enabled": True,
+                    "mode":    "vad",
                 },
             },
         )
 
-        log.info("[AGENT] Session built ✓ — starting…")
+        log.info("[AGENT] Session built - starting...")
         await session.start(room=job_ctx.room, agent=CareerVoiceAgent())
-        log.info("[AGENT] Live ✓ — waiting for user speech")
+        log.info("[AGENT] Live - waiting for user speech")
 
     except Exception as e:
-        log.exception("[AGENT] FATAL crash in entrypoint — full traceback:")
-        raise  # re-raise so LiveKit logs it and you see it in the terminal
+        log.exception("[AGENT] FATAL crash - this is why the agent disconnects:")
+        raise
 
 
-# ═════════════════════════════════════════════════════════════════════
+# ======================================================================
 if __name__ == "__main__":
     agents.cli.run_app(
         agents.WorkerOptions(
-            entrypoint_fnc = entrypoint,
-            worker_type    = agents.WorkerType.ROOM,
+            entrypoint_fnc=entrypoint,
+            # agent_name="" (default) = AUTOMATIC dispatch
+            # The worker joins every room that gets created, including
+            # LiveKit Playground test sessions.
+            # Do NOT set agent_name unless you want explicit-only dispatch.
+            worker_type=agents.WorkerType.ROOM,
         )
     )

@@ -56,7 +56,8 @@ DEFAULT_ROOM = "career-coach"
 # Agent name - must match what livekit_agent.py registers as.
 # When agent_name="", LiveKit dispatches ANY available registered worker.
 # Set to a specific name only if you use WorkerOptions(agent_name="...").
-AGENT_NAME = ""
+# Must match agent_name in WorkerOptions inside livekit_agent.py
+AGENT_NAME = "career-coach"
 
 logging.basicConfig(
     level  = logging.INFO,

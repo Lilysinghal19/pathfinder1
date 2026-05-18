@@ -243,10 +243,12 @@ if __name__ == "__main__":
     agents.cli.run_app(
         agents.WorkerOptions(
             entrypoint_fnc=entrypoint,
-            # agent_name="" (default) = AUTOMATIC dispatch
-            # The worker joins every room that gets created, including
-            # LiveKit Playground test sessions.
-            # Do NOT set agent_name unless you want explicit-only dispatch.
+            # IMPORTANT: Give the agent a name so it appears in the
+            # LiveKit Console dropdown under "Select agent".
+            # This name shows up in:
+            #   cloud.livekit.io -> Agents -> Agent Name column
+            #   Console -> "No agent selected" dropdown
+            agent_name="career-coach",
             worker_type=agents.WorkerType.ROOM,
         )
     )

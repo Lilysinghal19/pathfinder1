@@ -1,21 +1,3 @@
-"""
-token_server.py
-===============
-FastAPI server that:
-  1. Creates the LiveKit room (if it doesn't exist)
-  2. Dispatches the career agent into the room
-  3. Mints a signed JWT for the browser
-  4. Serves the frontend from static_lk/index.html
-
-Run: python token_server.py
-Open: http://localhost:8080
-
-Fixes:
-  - No emoji in print() - Windows cp1252 console safe
-  - Serves static_lk/index.html correctly
-  - Creates room + dispatches agent before giving token to browser
-"""
-
 import datetime
 import logging
 import os

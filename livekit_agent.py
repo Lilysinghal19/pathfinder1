@@ -1,18 +1,3 @@
-"""
-livekit_agent.py -- AI Career Voice Agent
-==========================================
-livekit-agents == 1.5.8 | livekit-plugins-google == 1.5.9
-
-Run:
-    python livekit_agent.py dev
-
-To test on LiveKit Playground:
-    1. Go to https://cloud.livekit.io -> your project -> Agents
-    2. Click "Test in Playground" next to your registered worker
-    3. The agent auto-dispatches (agent_name="" means automatic dispatch)
-
-Auth: single gcp_key.json for STT + LLM (Vertex AI) + TTS
-"""
 
 import json
 import logging
@@ -182,17 +167,21 @@ async def entrypoint(job_ctx: agents.JobContext):
 
             # VAD: Silero (local, zero latency, no API key)
             vad=silero.VAD.load(
+                # More forgiving settings so short pauses do not chop off a question.
                 min_speech_duration=0.05,
-                min_silence_duration=0.45,
-                prefix_padding_duration=0.2,
-                activation_threshold=0.55,
+                min_silence_duration=0.8,
+                prefix_padding_duration=0.3,
+                activation_threshold=0.45,
             ),
 
             # STT: Google Cloud Speech-to-Text
             # credentials_file uses the service account JSON
             stt=lk_google.STT(
                 languages=["en-US", "hi-IN"],
-                model="latest_short",
+                # Career questions are often longer than commands, so latest_long
+                # is more reliable than latest_short for complete utterances.
+                model="latest_long",
+                interim_results=True,
                 spoken_punctuation=False,
                 credentials_file=GCP_CREDENTIALS,
             ),
@@ -206,11 +195,16 @@ async def entrypoint(job_ctx: agents.JobContext):
                 temperature=0.7,
             ),
 
-            # TTS: Google Cloud Text-to-Speech
+            # TTS: Chirp 3 HD supports streaming synthesis and gives clean
+            # real-time speech in LiveKit. Neural2 requires non-streaming mode
+            # and can sound distorted in the console playback path.
             tts=lk_google.TTS(
-                voice_name="en-US-Neural2-D",
-                speaking_rate=1.05,
+                language="en-US",
+                voice_name="en-US-Chirp3-HD-Charon",
+                model_name="chirp_3",
+                sample_rate=24000,
                 credentials_file=GCP_CREDENTIALS,
+                use_streaming=True,
             ),
 
             # Turn handling -- typed dict format, verified from turn.py source
@@ -219,14 +213,15 @@ async def entrypoint(job_ctx: agents.JobContext):
             turn_handling={
                 "endpointing": {
                     "mode":      "fixed",
-                    "min_delay": 0.5,
-                    "max_delay": 0.8,
+                    "min_delay": 0.8,
+                    "max_delay": 1.8,
                 },
                 "interruption": {
                     "enabled": True,
                     "mode":    "vad",
                 },
             },
+            preemptive_generation=False,
         )
 
         log.info("[AGENT] Session built - starting...")

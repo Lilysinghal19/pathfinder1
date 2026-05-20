@@ -1,0 +1,29 @@
+{
+  "target_role": "Account Manager",
+  "match_pct": 0.0,
+  "gap_pct": 100.0,
+  "matching": [],
+  "missing": [
+    "account management",
+    "client relations",
+    "crm"
+  ],
+  "user_skills": [
+    "numpy",
+    "data analysis",
+    "pandas",
+    "feature engineering",
+    "model deployment",
+    "pytorch",
+    "matplotlib",
+    "machine learning",
+    "seaborn",
+    "rag",
+    "prompt engineering",
+    "langchain",
+    "git",
+    "scikit-learn",
+    "docker"
+  ],
+  "ai_insight": "**Current Level:** \nYou are a beginner. Your experience is 0 years, which is typical for a fresh graduate or someone new to the industry.\n\n**Top 10 Missing Skills:**\n* Account management\n* Client relations\n* CRM\n* Account Manager skills (since you're targeting the role)\n\n**What to focus next:**\n1. Take online courses to acquire missing skills, especially account management and client relations.\n2. Practice and build experience in these areas through internships or volunteering."
+}

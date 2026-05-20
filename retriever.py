@@ -295,8 +295,7 @@ def compute_skill_gap(
         "total_required": total,
         "docs_retrieved": len(docs),
         "context_str"   : build_context_string(docs),
-        "context_docs"  : docs,
-    }
+            }
 
 
 if __name__ == "__main__":

@@ -1,10 +1,7 @@
 """
 server.py  --  AI Skill Gap Analyzer + Career Coach + Voice Agent
-==================================================================
-Replaces Streamlit (oo.py). Run with:
-    python server.py
 
-Opens at: http://localhost:8000
+
 
 Endpoints:
   GET  /                    -> index.html
@@ -89,9 +86,7 @@ app.add_middleware(
 STATIC = Path(__file__).parent / "static"
 STATIC.mkdir(exist_ok=True)
 
-# ═════════════════════════════════════════════════════════════════════
-# HELPERS  (ported from oo.py)
-# ═════════════════════════════════════════════════════════════════════
+
 
 def extract_skills_llm(resume_text: str) -> list[str]:
     prompt = f"""You are a resume skill parser.

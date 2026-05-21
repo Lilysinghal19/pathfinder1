@@ -265,9 +265,9 @@ body{background:var(--bg);color:var(--text);font-family:'Inter',sans-serif;min-h
 
   <!-- Tabs -->
   <div class="tabs">
-    <button class="tab active" onclick="showTab('analyze')">📊 Analyze</button>
-    <button class="tab" onclick="showTab('chat')"    id="tab-chat">💬 Chat</button>
-    <button class="tab" onclick="showTab('voice')"   id="tab-voice">🎤 Voice</button>
+    <button class="tab active" id="btn-analyze" onclick="showTab('analyze')">📊 Analyze</button>
+    <button class="tab"        id="btn-chat"    onclick="showTab('chat')">💬 Chat</button>
+    <button class="tab"        id="btn-voice"   onclick="showTab('voice')">🎤 Voice</button>
   </div>
 
   <!-- ══ TAB: ANALYZE ══ -->
@@ -472,28 +472,14 @@ const AUD = document.getElementById('agent-audio');
 // ═══════════════════════════════════════════════════════════════
 // TABS
 // ═══════════════════════════════════════════════════════════════
-// ═══════════════════════════════════════════════════════════════
-// FIXED TABS FUNCTION
-// ═══════════════════════════════════════════════════════════════
 function showTab(name) {
-  // Hide all tab contents
-  document.getElementById('tab-analyze').style.display = 'none';
-  document.getElementById('tab-chat').style.display = 'none';
-  document.getElementById('tab-voice').style.display = 'none';
-
-  // Show the selected tab content
-  const activeTab = document.getElementById('tab-' + name);
-  if (activeTab) {
-    activeTab.style.display = 'block';
-  }
-
-  // Update active tab button styling
-  document.querySelectorAll('.tab').forEach(tab => {
-    tab.classList.remove('active');
-    const onclickText = tab.getAttribute('onclick') || '';
-    if (onclickText.includes(name)) {
-      tab.classList.add('active');
-    }
+  // Content panels: id="tab-analyze", "tab-chat", "tab-voice"
+  // Buttons:        id="btn-analyze", "btn-chat",  "btn-voice"
+  ['analyze', 'chat', 'voice'].forEach(function(t) {
+    var panel = document.getElementById('tab-' + t);
+    var btn   = document.getElementById('btn-' + t);
+    if (panel) panel.style.display = (t === name) ? 'block' : 'none';
+    if (btn)   btn.classList.toggle('active', t === name);
   });
 }
 
@@ -643,13 +629,15 @@ function renderResults(data) {
   // Show results
   document.getElementById('results').style.display = 'block';
 
-  // Unlock chat
-  document.getElementById('chat-locked').style.display = 'none';
-  document.getElementById('chat-ui').style.display     = 'block';
-  document.getElementById('chat-context-bar').style.display = 'block';
+  // Unlock chat tab content
+  document.getElementById('chat-locked').style.display          = 'none';
+  document.getElementById('chat-ui').style.display              = 'block';
+  document.getElementById('chat-context-bar').style.display     = 'block';
   document.getElementById('chat-context-bar').innerHTML =
-    `Context: <b>${gap.target_role}</b> | Match <b>${gap.match_pct}%</b> | Gap <b>${gap.gap_pct}%</b>`;
-  document.getElementById('tab-chat').classList.add('active');
+    'Context: <b>' + gap.target_role + '</b> | Match <b>' + gap.match_pct + '%</b> | Gap <b>' + gap.gap_pct + '%</b>';
+
+  // Switch to Chat tab automatically after analysis
+  showTab('chat');
 }
 
 function renderTags(containerId, skills, cls) {

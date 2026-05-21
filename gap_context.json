@@ -1,29 +1,46 @@
 {
-  "target_role": "Account Manager",
-  "match_pct": 0.0,
-  "gap_pct": 100.0,
-  "matching": [],
+  "target_role": "Ai Engineer",
+  "match_pct": 36.8,
+  "gap_pct": 63.2,
+  "matching": [
+    "docker",
+    "langchain",
+    "machine learning",
+    "model deployment",
+    "prompt engineering",
+    "pytorch",
+    "rag"
+  ],
   "missing": [
-    "account management",
-    "client relations",
-    "crm"
+    "computer vision",
+    "deep learning",
+    "experiment tracking",
+    "generative ai",
+    "huggingface",
+    "kubernetes",
+    "llm",
+    "mlflow",
+    "neural networks",
+    "nlp",
+    "python",
+    "tensorflow"
   ],
   "user_skills": [
-    "numpy",
+    "docker",
+    "rag",
+    "git",
+    "prompt engineering",
+    "machine learning",
+    "feature engineering",
+    "scikit-learn",
+    "pytorch",
     "data analysis",
     "pandas",
-    "feature engineering",
-    "model deployment",
-    "pytorch",
     "matplotlib",
-    "machine learning",
-    "seaborn",
-    "rag",
-    "prompt engineering",
     "langchain",
-    "git",
-    "scikit-learn",
-    "docker"
+    "model deployment",
+    "numpy",
+    "seaborn"
   ],
-  "ai_insight": "**Current Level:** \nYou are a beginner. Your experience is 0 years, which is typical for a fresh graduate or someone new to the industry.\n\n**Top 10 Missing Skills:**\n* Account management\n* Client relations\n* CRM\n* Account Manager skills (since you're targeting the role)\n\n**What to focus next:**\n1. Take online courses to acquire missing skills, especially account management and client relations.\n2. Practice and build experience in these areas through internships or volunteering."
+  "ai_insight": "**Current Level:**\nBased on the matching skills, the candidate is at an **Intermediate** level with 36.8% match.\n\n**Top 10 Missing Skills:**\n\u2022 Computer Vision\n\u2022 Deep Learning\n\u2022 Experiment Tracking\n\u2022 Generative AI\n\u2022 Huggingface\n\u2022 Kubernetes\n\u2022 LLM (Large Language Model)\n\u2022 MLflow\n\u2022 Neural Networks\n\u2022 NLP (Natural Language Processing)\n\n**What to Focus Next:**\nFocus on acquiring skills in Deep Learning, Experiment Tracking, and NLP to bridge the gap of 63.2%. Start by studying relevant courses, reading industry blogs, and participating in projects related to these areas."
 }

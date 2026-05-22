@@ -88,47 +88,106 @@ STATIC.mkdir(exist_ok=True)
 
 
 
-def extract_skills_llm(resume_text: str) -> list[str]:
-    prompt = f"""You are a resume skill parser.
-Your ONLY job: extract technical skills EXPLICITLY written in this resume.
-Rules:
-1. ONLY include skills that appear word-for-word in the resume text
-2. DO NOT add, infer, or assume any skill not written
-3. Normalize: lowercase, fix obvious typos
-4. Split combined skills: "pandas, numpy" -> separate items
-5. Keep multi-word skills intact: "machine learning", "deep learning"
-6. Include: frameworks, libraries, languages, tools, platforms, methods
-7. Exclude: soft skills, job titles, company names, degree names, years, percentages
-8. If heading has skills extract those too
-9. If skills are written together with operators extract them separately
+import json
+from typing import List
 
-Resume text:
-{resume_text[:4000]}
+def extract_skills_llm_two_pass(resume_text: str) -> List[str]:
+    """
+    Two-pass LLM-as-Judge approach for high-quality skill extraction.
+    
+    Stage 1 (Generator): Maximizes recall - extracts everything possible
+    Stage 2 (Judge):     Improves precision - cleans, normalizes & validates
+    """
+    
+    # ====================== STAGE 1: GENERATOR ======================
+    generator_prompt = f"""You are an expert resume skill extractor.
 
-Return ONLY a comma-separated list. Nothing else."""
-    resp = groq_client.chat.completions.create(
+Extract EVERY technical skill, tool, library, framework, methodology, platform, and technology mentioned in the resume.
+
+Guidelines:
+- Look in Skills section, Projects, Experience, and everywhere else.
+- Include variations and different capitalizations.
+- Split combined skills (e.g., "Pandas, NumPy" → separate items).
+- Include multi-word skills as they are ("prompt engineering", "time series forecasting").
+- Do not miss anything.
+
+Return a comma-separated list of all skills found.
+
+Resume:
+{resume_text[:6500]}
+
+Skills:"""
+
+    # Call LLM - Stage 1
+    stage1_resp = groq_client.chat.completions.create(
         model=config.GROQ_MODEL,
-        messages=[{"role": "user", "content": prompt}],
-        temperature=0,
-        max_tokens=600,
+        messages=[{"role": "user", "content": generator_prompt}],
+        temperature=0.1,
+        max_tokens=800,
     )
-    raw = resp.choices[0].message.content.strip()
-    skills = []
-    for s in raw.split(","):
-        s = s.strip().lower().lstrip("0123456789.-) ")
-        if not s or len(s) < 2:
-            continue
-        if any(bad in s for bad in [
-            "year", "month", "%", "winner", "university",
-            "bachelor", "master", "phd", "cgpa", "gpa",
-            "internship", "training", "certification", "award"
-        ]):
-            continue
-        skills.append(s)
-    return list(dict.fromkeys(skills))
+    
+    raw_skills_text = stage1_resp.choices[0].message.content.strip()
+
+    # ====================== STAGE 2: JUDGE / EVALUATOR ======================
+    judge_prompt = f"""You are a strict and precise Skill List Judge.
+
+Take the raw skill list below and return a clean, accurate, deduplicated list.
+
+Rules:
+- Fix obvious typos (e.g., "promt" → "prompt", "gemini pro sdk" → "google gemini pro sdk")
+- Normalize everything to lowercase
+- Keep standard multi-word skills together ("machine learning", "rag", "retrieval augmented generation")
+- Remove duplicates
+- Remove anything that is NOT a technical skill (dates, companies, degrees, soft skills, etc.)
+- Be conservative: only keep real technical skills
+
+Raw Skills:
+{raw_skills_text}
+
+Return ONLY a valid JSON array like this:
+{{"skills": ["rag", "langchain", "prompt engineering", ...]}}
+
+JSON:"""
+
+    # Call LLM - Stage 2 (Judge)
+    stage2_resp = groq_client.chat.completions.create(
+        model=config.GROQ_MODEL,
+        messages=[{"role": "user", "content": judge_prompt}],
+        temperature=0.0,
+        max_tokens=700,
+        response_format={"type": "json_object"}
+    )
+
+    # ====================== PARSE & FINAL CLEANING ======================
+    try:
+        data = json.loads(stage2_resp.choices[0].message.content)
+        skills = data.get("skills", []) if isinstance(data, dict) else data
+        
+        # Final safety cleaning
+        final_skills = []
+        bad_words = {"b.tech", "cgpa", "winner", "hackathon", "202", "2025", "2026", 
+                    "bachelor", "master", "internship", "training"}
+        
+        for skill in skills:
+            skill = str(skill).strip().lower()
+            if len(skill) < 2:
+                continue
+            if any(bad in skill for bad in bad_words):
+                continue
+            if skill not in final_skills:
+                final_skills.append(skill)
+                
+        return final_skills
+        
+    except Exception as e:
+        print(f"JSON parsing failed in Judge stage: {e}")
+        # Fallback: simple cleaning of raw output
+        fallback = [s.strip().lower() for s in raw_skills_text.split(",") if len(s.strip()) >= 2]
+        return list(dict.fromkeys(fallback))
 
 
-_db_skills_cache: list[str] | None = None
+# Optional: One-line alias for easy usage
+extract_skills = extract_skills_llm_two_pass
 
 def get_all_skills_from_db() -> list[str]:
     global _db_skills_cache

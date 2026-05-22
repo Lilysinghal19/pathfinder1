@@ -26,21 +26,21 @@
     "tensorflow"
   ],
   "user_skills": [
-    "docker",
-    "rag",
-    "git",
-    "prompt engineering",
-    "machine learning",
-    "feature engineering",
-    "scikit-learn",
     "pytorch",
-    "data analysis",
-    "pandas",
+    "seaborn",
+    "rag",
     "matplotlib",
-    "langchain",
+    "data analysis",
+    "machine learning",
+    "scikit-learn",
     "model deployment",
+    "pandas",
+    "prompt engineering",
+    "langchain",
     "numpy",
-    "seaborn"
+    "git",
+    "feature engineering",
+    "docker"
   ],
-  "ai_insight": "**Current Level:**\nBased on the matching skills, the candidate is at an **Intermediate** level with 36.8% match.\n\n**Top 10 Missing Skills:**\n\u2022 Computer Vision\n\u2022 Deep Learning\n\u2022 Experiment Tracking\n\u2022 Generative AI\n\u2022 Huggingface\n\u2022 Kubernetes\n\u2022 LLM (Large Language Model)\n\u2022 MLflow\n\u2022 Neural Networks\n\u2022 NLP (Natural Language Processing)\n\n**What to Focus Next:**\nFocus on acquiring skills in Deep Learning, Experiment Tracking, and NLP to bridge the gap of 63.2%. Start by studying relevant courses, reading industry blogs, and participating in projects related to these areas."
+  "ai_insight": "**ASSESSMENT**\nYou have a strong foundation in AI engineering, with existing skills in PyTorch, machine learning, and model deployment, which is evident from the 36.8% match with the target role. However, you lack experience in deep learning, computer vision, and other advanced AI areas, resulting in a significant skill gap of 63.2%. To bridge this gap, you'll need to focus on acquiring new skills and building practical experience.\n\n**TOP 10 SKILLS TO LEARN (ORDERED BY IMPORTANCE)**\n\n1. **Deep learning**: Essential for advanced AI applications, deep learning will help you build more complex models and improve your knowledge of neural networks.\n2. **Computer vision**: A crucial area in AI, computer vision enables machines to interpret and understand visual data from images and videos.\n3. **Experiment tracking**: To ensure reproducibility and efficiency, experiment tracking is vital for monitoring and optimizing machine learning experiments.\n4. **Generative AI**: This skill will allow you to create new, synthetic data that can be used for training and testing AI models.\n5. **Huggingface**: A popular library for natural language processing and deep learning, Huggingface will expand your capabilities in NLP and other areas.\n6. **Kubernetes**: Knowledge of container orchestration will help you deploy and manage AI models in production environments.\n7. **LLM (Large Language Model)**: Understanding LLMs will enable you to develop and fine"
 }

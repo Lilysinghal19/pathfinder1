@@ -1,7 +1,10 @@
 """
 server.py  --  AI Skill Gap Analyzer + Career Coach + Voice Agent
+==================================================================
+Replaces Streamlit (oo.py). Run with:
+    python server.py
 
-
+Opens at: http://localhost:8000
 
 Endpoints:
   GET  /                    -> index.html
@@ -86,108 +89,128 @@ app.add_middleware(
 STATIC = Path(__file__).parent / "static"
 STATIC.mkdir(exist_ok=True)
 
+# ═════════════════════════════════════════════════════════════════════
+# HELPERS  (ported from oo.py)
+# ═════════════════════════════════════════════════════════════════════
 
-
-import json
-from typing import List
-
-def extract_skills_llm_two_pass(resume_text: str) -> List[str]:
+# ── Extractor LLM: first-pass raw skill extraction ───────────────────
+def extract_skills_llm(resume_text: str) -> list[str]:
     """
-    Two-pass LLM-as-Judge approach for high-quality skill extraction.
-    
-    Stage 1 (Generator): Maximizes recall - extracts everything possible
-    Stage 2 (Judge):     Improves precision - cleans, normalizes & validates
+    Pass 1 — Extractor LLM.
+    Extracts skills explicitly written in the resume, strictly verbatim.
+    Output goes to the LLM-as-a-Judge for validation before DB mapping.
     """
-    
-    # ====================== STAGE 1: GENERATOR ======================
-    generator_prompt = f"""You are an expert resume skill extractor.
-
-Extract EVERY technical skill, tool, library, framework, methodology, platform, and technology mentioned in the resume.
-
-Guidelines:
-- Look in Skills section, Projects, Experience, and everywhere else.
-- Include variations and different capitalizations.
-- Split combined skills (e.g., "Pandas, NumPy" → separate items).
-- Include multi-word skills as they are ("prompt engineering", "time series forecasting").
-- Do not miss anything.
-
-Return a comma-separated list of all skills found.
-
-Resume:
-{resume_text[:6500]}
-
-Skills:"""
-
-    # Call LLM - Stage 1
-    stage1_resp = groq_client.chat.completions.create(
-        model=config.GROQ_MODEL,
-        messages=[{"role": "user", "content": generator_prompt}],
-        temperature=0.1,
-        max_tokens=800,
-    )
-    
-    raw_skills_text = stage1_resp.choices[0].message.content.strip()
-
-    # ====================== STAGE 2: JUDGE / EVALUATOR ======================
-    judge_prompt = f"""You are a strict and precise Skill List Judge.
-
-Take the raw skill list below and return a clean, accurate, deduplicated list.
+    prompt = f"""You are a resume skill parser.
+Your ONLY job: extract technical skills EXPLICITLY written in this resume.
 
 Rules:
-- Fix obvious typos (e.g., "promt" → "prompt", "gemini pro sdk" → "google gemini pro sdk")
-- Normalize everything to lowercase
-- Keep standard multi-word skills together ("machine learning", "rag", "retrieval augmented generation")
-- Remove duplicates
-- Remove anything that is NOT a technical skill (dates, companies, degrees, soft skills, etc.)
-- Be conservative: only keep real technical skills
+1. ONLY include skills that appear word-for-word in the resume text
+2. DO NOT add, infer, or assume any skill not explicitly written
+3. Normalize to lowercase; fix obvious typos (e.g. "Pyhton" -> "python")
+4. Split combined skills: "pandas, numpy" -> separate items
+5. Keep multi-word skills intact: "machine learning", "deep learning", "time series analysis"
+6. Abbreviations: keep as-is if written that way (e.g. "nlp", "lstm", "rag", "gru", "rnn")
+7. Include: ML frameworks, libraries, languages, tools, platforms, algorithms, methods
+8. Exclude strictly: soft skills, job titles, company names, degree names, years, percentages,
+   certifications, university names, awards, city names, CGPA/GPA values
+9. Extract from ALL sections: Skills, Projects, Experience, Certifications
+10. Operators: "Playwright, Selenium -> Pandas -> MySQL" means 4 separate skills
 
-Raw Skills:
-{raw_skills_text}
+Resume text:
+{resume_text[:6000]}
 
-Return ONLY a valid JSON array like this:
-{{"skills": ["rag", "langchain", "prompt engineering", ...]}}
+Return ONLY a comma-separated list on one line. No explanations. No numbering. Nothing else."""
 
-JSON:"""
-
-    # Call LLM - Stage 2 (Judge)
-    stage2_resp = groq_client.chat.completions.create(
+    resp = groq_client.chat.completions.create(
         model=config.GROQ_MODEL,
-        messages=[{"role": "user", "content": judge_prompt}],
-        temperature=0.0,
-        max_tokens=700,
-        response_format={"type": "json_object"}
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0,
+        max_tokens=800,
     )
-
-    # ====================== PARSE & FINAL CLEANING ======================
-    try:
-        data = json.loads(stage2_resp.choices[0].message.content)
-        skills = data.get("skills", []) if isinstance(data, dict) else data
-        
-        # Final safety cleaning
-        final_skills = []
-        bad_words = {"b.tech", "cgpa", "winner", "hackathon", "202", "2025", "2026", 
-                    "bachelor", "master", "internship", "training"}
-        
-        for skill in skills:
-            skill = str(skill).strip().lower()
-            if len(skill) < 2:
-                continue
-            if any(bad in skill for bad in bad_words):
-                continue
-            if skill not in final_skills:
-                final_skills.append(skill)
-                
-        return final_skills
-        
-    except Exception as e:
-        print(f"JSON parsing failed in Judge stage: {e}")
-        # Fallback: simple cleaning of raw output
-        fallback = [s.strip().lower() for s in raw_skills_text.split(",") if len(s.strip()) >= 2]
-        return list(dict.fromkeys(fallback))
+    raw = resp.choices[0].message.content.strip()
+    skills = _parse_skill_list(raw)
+    log.info("[EXTRACTOR] Raw extracted: %d skills", len(skills))
+    return skills
 
 
-# Optional: One-line alias for easy usage
-extract_skills = extract_skills_llm_two_pass
+# ── LLM-as-a-Judge: validate and deduplicate extracted skills ─────────
+def judge_skills_llm(raw_skills: list[str], resume_text: str) -> list[str]:
+    """
+    Pass 2 — LLM-as-a-Judge (Verifier LLM pattern).
+
+    Why: The extractor LLM can hallucinate skills not in the resume,
+    miss skills written in non-standard ways, or produce duplicates.
+    The judge independently reviews the extracted list against the
+    original resume text and removes anything not actually present.
+
+    This is NOT Self-Refine (same LLM improving itself) — we use a
+    separate call with a different role prompt and explicit grounding
+    in the original resume text, making it a true Verifier LLM.
+    """
+    if not raw_skills:
+        return []
+
+    skills_str = ", ".join(raw_skills)
+    prompt = f"""You are an expert skill verification judge for resumes.
+
+You will be given:
+1. A list of skills claimed to be extracted from a resume
+2. The original resume text
+
+Your job: verify each skill and return ONLY skills that are genuinely present
+in the resume text (explicitly written, not inferred).
+
+Also do these corrections:
+- Remove any non-technical items (company names, city names, job titles, etc.)
+- Remove duplicates (keep one: e.g. if both "rag" and "retrieval augmented generation" appear, keep "rag")
+- Normalize: lowercase, fix typos
+- Split any skills that were accidentally joined (e.g. "pytorchkeras" -> "pytorch", "keras")
+- Keep all valid technical skills even if they seem advanced for the candidate's level
+
+Claimed extracted skills:
+{skills_str}
+
+Original resume text:
+{resume_text[:6000]}
+
+Return ONLY a clean comma-separated list of verified skills. Nothing else."""
+
+    resp = groq_client.chat.completions.create(
+        model=config.GROQ_MODEL,
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0,
+        max_tokens=800,
+    )
+    raw = resp.choices[0].message.content.strip()
+    verified = _parse_skill_list(raw)
+    log.info("[JUDGE] Verified: %d skills (removed %d)", len(verified), len(raw_skills) - len(verified))
+    return verified
+
+
+def _parse_skill_list(raw: str) -> list[str]:
+    """Clean and parse a comma-separated skill string into a deduped list."""
+    bad_words = [
+        "year", "month", "%", "winner", "university", "bachelor", "master",
+        "phd", "cgpa", "gpa", "internship", "training", "certification",
+        "award", "college", "institute", "jaipur", "rajasthan", "alwar",
+        "india", "government", "hackathon", "present", "june", "july",
+        "august", "sept", "march", "innovation", "cell",
+    ]
+    skills = []
+    for s in raw.split(","):
+        s = s.strip().lower().lstrip("0123456789.-) ").strip()
+        if not s or len(s) < 2:
+            continue
+        if any(bad in s for bad in bad_words):
+            continue
+        # Skip if it looks like a sentence (more than 5 words)
+        if len(s.split()) > 5:
+            continue
+        skills.append(s)
+    return list(dict.fromkeys(skills))  # dedupe preserving order
+
+
+_db_skills_cache: list[str] | None = None
 
 def get_all_skills_from_db() -> list[str]:
     global _db_skills_cache
@@ -204,7 +227,19 @@ def get_all_skills_from_db() -> list[str]:
     return _db_skills_cache
 
 
-def map_skills_to_db(extracted: list[str], threshold: float = 0.75) -> list[str]:
+def map_skills_to_db(extracted: list[str], threshold: float = 0.62) -> list[str]:
+    """
+    Map extracted skills to DB canonical skill names via cosine similarity.
+
+    Threshold lowered from 0.75 -> 0.62 because:
+    - "rag" needs to match "retrieval augmented generation" in DB
+    - "llm fine-tuning" needs to match "fine tuning" or "llm"
+    - "cot" (chain of thought) and "few-shot" are real skills with low-similarity DB names
+    - Embeddings for short abbreviations have lower cosine similarity by nature
+
+    To prevent garbage matches at 0.62, we also keep only the TOP-1 match per skill
+    and skip if the best match similarity is still below threshold.
+    """
     if not extracted:
         return []
     db_skills = get_all_skills_from_db()
@@ -214,9 +249,13 @@ def map_skills_to_db(extracted: list[str], threshold: float = 0.75) -> list[str]
     mapped = []
     for i, skill in enumerate(extracted):
         sims = cosine_similarity([ext_vecs[i]], db_vecs)[0]
-        best_idx = sims.argmax()
-        if sims[best_idx] >= threshold:
+        best_idx = int(sims.argmax())
+        best_sim = float(sims[best_idx])
+        if best_sim >= threshold:
             mapped.append(db_skills[best_idx])
+            log.debug("[MAP] '%s' -> '%s' (%.3f)", skill, db_skills[best_idx], best_sim)
+        else:
+            log.debug("[MAP] '%s' -> no match (best=%.3f)", skill, best_sim)
     return list(set(mapped))
 
 
@@ -265,7 +304,8 @@ def build_gap_context_str(gap: dict, insight: str) -> str:
         f"Missing       : {', '.join(gap['missing'][:10])}\n\n"
         f"AI Insight:\n{insight}"
     )
-    
+
+
 # ═════════════════════════════════════════════════════════════════════
 # API ROUTES
 # ═════════════════════════════════════════════════════════════════════
@@ -302,10 +342,17 @@ async def analyze(
     if not resume_text.strip():
         raise HTTPException(400, "Could not extract text from file")
 
-    raw_skills = extract_skills_llm(resume_text)
-    if not raw_skills:
+    # Pass 1: Extractor LLM — pull skills from resume text
+    raw_skills_pass1 = extract_skills_llm(resume_text)
+    if not raw_skills_pass1:
         raise HTTPException(400, "No skills detected in resume")
 
+    # Pass 2: LLM-as-a-Judge — verify, deduplicate, correct
+    raw_skills = judge_skills_llm(raw_skills_pass1, resume_text)
+    if not raw_skills:
+        raw_skills = raw_skills_pass1  # fallback to pass 1 if judge returns empty
+
+    # Map verified skills to canonical DB skill names
     skills     = map_skills_to_db(raw_skills)
     skills_str = ", ".join(skills)
     result     = analyze_skill_gap(
@@ -340,8 +387,8 @@ async def analyze(
 
     return JSONResponse({
         "session_id":  session_id,
-        "gap":        json.loads(json.dumps(gap,default=str)),
-        "insight":     str(insight),
+        "gap":         gap,
+        "insight":     insight,
         "user_skills": raw_skills,
     })
 

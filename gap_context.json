@@ -26,21 +26,22 @@
     "tensorflow"
   ],
   "user_skills": [
-    "pytorch",
-    "seaborn",
-    "rag",
-    "matplotlib",
-    "data analysis",
-    "machine learning",
-    "scikit-learn",
     "model deployment",
-    "pandas",
-    "prompt engineering",
     "langchain",
+    "data analysis",
+    "pytorch",
     "numpy",
     "git",
     "feature engineering",
-    "docker"
+    "docker",
+    "machine learning",
+    "seaborn",
+    "matplotlib",
+    "sql",
+    "rag",
+    "pandas",
+    "scikit-learn",
+    "prompt engineering"
   ],
-  "ai_insight": "**ASSESSMENT**\nYou have a strong foundation in AI engineering, with existing skills in PyTorch, machine learning, and model deployment, which is evident from the 36.8% match with the target role. However, you lack experience in deep learning, computer vision, and other advanced AI areas, resulting in a significant skill gap of 63.2%. To bridge this gap, you'll need to focus on acquiring new skills and building practical experience.\n\n**TOP 10 SKILLS TO LEARN (ORDERED BY IMPORTANCE)**\n\n1. **Deep learning**: Essential for advanced AI applications, deep learning will help you build more complex models and improve your knowledge of neural networks.\n2. **Computer vision**: A crucial area in AI, computer vision enables machines to interpret and understand visual data from images and videos.\n3. **Experiment tracking**: To ensure reproducibility and efficiency, experiment tracking is vital for monitoring and optimizing machine learning experiments.\n4. **Generative AI**: This skill will allow you to create new, synthetic data that can be used for training and testing AI models.\n5. **Huggingface**: A popular library for natural language processing and deep learning, Huggingface will expand your capabilities in NLP and other areas.\n6. **Kubernetes**: Knowledge of container orchestration will help you deploy and manage AI models in production environments.\n7. **LLM (Large Language Model)**: Understanding LLMs will enable you to develop and fine"
+  "ai_insight": "Based on the candidate's profile:\n\n1. Current Level: Junior to Mid-level AI Engineer, likely in a learning or entry-level position, with minimal industry experience (0 yrs).\n\n2. Top 10 Missing Skills:\n * Computer Vision\n * Deep Learning\n * Experiment Tracking\n * Generative AI\n * Huggingface\n * Kubernetes\n * LLM (Large Language Model)\n * MLflow\n * Neural Networks\n * NLP (Natural Language Processing)\n\n3. What to focus next:\n Focus on building practical experience in Computer Vision and Deep Learning using tools like PyTorch and TensorFlow. Additionally, explore frameworks like Huggingface and MLflow to enhance your skills."
 }

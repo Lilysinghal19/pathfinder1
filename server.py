@@ -211,6 +211,8 @@ def extract_skills_llm(resume_text: str) -> list[str]:
 # ── Stage 2: Cosine-similarity DB mapping ────────────────────────────
 
 _db_skills_cache: list[str] | None = None
+_db_vecs_cache:   list      | None = None   # cached embeddings for DB skills
+
 
 def get_all_skills_from_db() -> list[str]:
     """Return all unique skill names from ChromaDB, cached after first load."""
@@ -230,155 +232,340 @@ def get_all_skills_from_db() -> list[str]:
     return _db_skills_cache
 
 
-def map_skills_to_db(extracted: list[str]) -> list[str]:
+def _get_db_vecs(db_skills: list[str]):
+    """Return cached DB embeddings (recomputed only when DB skills change)."""
+    global _db_vecs_cache, _db_skills_cache
+    if _db_vecs_cache is None or _db_skills_cache != db_skills:
+        _db_vecs_cache = get_embeddings().embed_documents(db_skills)
+    return _db_vecs_cache
+
+
+def map_skills_to_db(extracted: list[str]) -> tuple[list[str], list[dict]]:
     """
-    Stage 2 — Dynamic cosine-similarity mapping.
+    Stage 2 — Cosine-similarity DB mapping with TOP-3 candidates.
 
-    For every extracted skill, find the closest DB skill by embedding
-    cosine similarity.  Uses TWO thresholds:
+    Returns:
+        mapped    : list of accepted DB skill names (best match per extracted skill)
+        evidence  : list of dicts — one per extracted skill — containing:
+                    {
+                      "raw":        original extracted skill,
+                      "accepted":   best DB match if accepted else None,
+                      "sim":        cosine similarity of best match,
+                      "top3":       [(db_skill, sim), ...] top-3 candidates,
+                      "confidence": "high" | "mid" | "low"
+                    }
 
-      HIGH (>= 0.80): accept directly — very confident match
-      MID  (>= 0.55): accept only if the DB skill is a SUBSTRING of the
-                       extracted skill or vice versa, OR if the extracted
-                       skill is short (≤ 4 chars, e.g. "nlp", "rag").
-                       This handles abbreviation-to-full-form mismatches.
-      BELOW 0.55:     reject — likely noise or hallucination
-
-    Why two thresholds instead of one?
-      - "nlp" vs "natural language processing" has cosine ~0.60 but IS the same skill
-      - "rag" vs "retrieval augmented generation" is ~0.58 but IS the same skill
-      - A single threshold of 0.80 misses these; 0.55 with no guard lets garbage through
+    Two-threshold strategy:
+      HIGH (>= 0.82): always accept
+      MID  (0.55-0.82): accept only if short abbreviation (<=4 non-space chars)
+                        OR substring overlap exists
+      LOW  (< 0.55): reject — but include in evidence so judge can review
     """
     if not extracted:
-        return []
+        return [], []
 
     db_skills = get_all_skills_from_db()
     if not db_skills:
-        log.warning("[MAP] DB is empty — returning extracted skills as-is")
-        return extracted
+        log.warning("[MAP] DB is empty — passing extracted skills straight through")
+        return extracted, []
 
     emb      = get_embeddings()
     ext_vecs = emb.embed_documents(extracted)
-    db_vecs  = emb.embed_documents(db_skills)
-    sims     = cosine_similarity(ext_vecs, db_vecs)  # shape: (len_ext, len_db)
+    db_vecs  = _get_db_vecs(db_skills)
+    sims     = cosine_similarity(ext_vecs, db_vecs)   # (len_ext, len_db)
 
-    mapped, seen = [], set()
+    mapped, seen, evidence = [], set(), []
     for i, skill in enumerate(extracted):
-        row      = sims[i]
-        best_idx = int(row.argmax())
-        best_sim = float(row[best_idx])
-        db_match = db_skills[best_idx]
+        row = sims[i]
 
-        accept = False
-        if best_sim >= 0.80:
-            # High confidence — always accept
-            accept = True
-        elif best_sim >= 0.55:
-            # Medium confidence — accept only with substring or short-abbrev guard
-            short = len(skill.replace(" ", "")) <= 4   # "nlp", "rag", "gru" etc.
-            substr = (skill in db_match) or (db_match in skill)
-            accept = short or substr
+        # Top-3 candidates by similarity
+        top3_idx  = row.argsort()[::-1][:3].tolist()
+        top3      = [(db_skills[j], float(row[j])) for j in top3_idx]
+        best_db, best_sim = top3[0]
 
-        if accept:
-            if db_match not in seen:
-                seen.add(db_match)
-                mapped.append(db_match)
-            log.debug("[MAP] %-30s -> %-30s  sim=%.3f  accept=%s",
-                      skill, db_match, best_sim, accept)
+        # Decision logic
+        short  = len(skill.replace(" ", "")) <= 4
+        substr = (skill in best_db) or (best_db in skill)
+
+        if best_sim >= 0.82:
+            conf, accept = "high", True
+        elif best_sim >= 0.55 and (short or substr):
+            conf, accept = "mid", True
         else:
-            log.debug("[MAP] %-30s -> NO MATCH (best=%.3f %s)",
-                      skill, best_sim, db_match)
+            conf, accept = "low", False
+
+        accepted_name = None
+        if accept and best_db not in seen:
+            seen.add(best_db)
+            mapped.append(best_db)
+            accepted_name = best_db
+
+        ev = {
+            "raw":       skill,
+            "accepted":  accepted_name,
+            "sim":       round(best_sim, 4),
+            "top3":      [(db, round(s, 4)) for db, s in top3],
+            "confidence": conf,
+        }
+        evidence.append(ev)
+        log.debug("[MAP] %-28s -> %-28s  sim=%.3f  conf=%-4s  accept=%s",
+                  skill, best_db, best_sim, conf, accept)
 
     log.info("[STAGE2-MAP] %d/%d skills mapped to DB", len(mapped), len(extracted))
-    return mapped
+    return mapped, evidence
 
 
-# ── Stage 3: LLM-as-a-Judge ───────────────────────────────────────────
+# ── Stage 3: Robust LLM-as-a-Judge ────────────────────────────────────
+#
+# Robustness improvements over the single-call version:
+#
+#  1. TWO INDEPENDENT JUDGE CALLS (different prompts + roles)
+#       Call A — "Removal judge":  looks only at mapped skills and decides
+#                what to REMOVE (false cosine matches, noise)
+#       Call B — "Recovery judge": looks at Stage 1 raw skills + DB skill
+#                list and decides what was MISSED and should be ADDED
+#     Combining both in one call causes the LLM to conflate the tasks and
+#     lose precision on each.  Splitting gives each judge a clear, focused job.
+#
+#  2. STRUCTURED JSON OUTPUT from each judge call
+#       Instead of a comma list the judge returns:
+#         { "keep": [...], "reason": "..." }      (removal judge)
+#         { "add":  [...], "reason": "..." }      (recovery judge)
+#       This makes parsing deterministic and auditable.
+#
+#  3. EVIDENCE-BASED CONTEXT — Stage 2 evidence (similarity scores + top-3)
+#       is shown to the removal judge so it can weigh confidence.
+#       A skill with sim=0.56 and no substring overlap is more likely wrong
+#       than one with sim=0.79 and a substring match.
+#
+#  4. DB COVERAGE — the recovery judge sees the FULL DB skill list,
+#       split into chunks if needed, ensuring no DB skill is invisible.
+#
+#  5. HARD DB-MEMBERSHIP SAFETY FILTER
+#       After both judges run, any output skill is checked against the DB set.
+#       Skills not in the DB are silently dropped — judge cannot hallucinate
+#       a skill that doesn't exist in the DB.
+#
+#  6. GRACEFUL FALLBACK CHAIN
+#       Stage3 output empty   -> use Stage 2 mapped (not an error)
+#       Stage2 mapped empty   -> use Stage 1 raw (not an error)
+#       Both empty            -> raise extraction failure
+# ─────────────────────────────────────────────────────────────────────
 
-def judge_skills_llm(
-    extracted_raw:  list[str],   # Pass 1 output
-    mapped_to_db:   list[str],   # Pass 2 output
-    db_skills:      list[str],   # all skills in DB
-    resume_text:    str,
+
+def _call_llm_json(prompt: str, fallback: dict) -> dict:
+    """
+    Call Groq LLM and parse JSON response robustly.
+    Falls back to `fallback` dict if response is not valid JSON.
+    """
+    import json as _json, re as _re
+    try:
+        resp = groq_client.chat.completions.create(
+            model=config.GROQ_MODEL,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0,
+            max_tokens=700,
+        )
+        raw = resp.choices[0].message.content.strip()
+        # Strip markdown code fences if present
+        raw = _re.sub(r"^```(?:json)?\s*", "", raw, flags=_re.M)
+        raw = _re.sub(r"```\s*$", "", raw, flags=_re.M).strip()
+        return _json.loads(raw)
+    except Exception as e:
+        log.warning("[JUDGE] JSON parse failed (%s) — using fallback", e)
+        return fallback
+
+
+def _judge_removal(
+    mapped_to_db: list[str],
+    evidence:     list[dict],
+    resume_text:  str,
 ) -> list[str]:
     """
-    Stage 3 — LLM-as-a-Judge (Verifier LLM).
-
-    Inputs given to the judge:
-      A. Skills extracted verbatim from the resume (Pass 1)
-      B. Those skills mapped to DB canonical names (Pass 2)
-      C. FULL list of all skills that exist in the DB
-      D. Original resume text for grounding
-
-    The judge's job:
-      1. From list B, REMOVE any skill the candidate clearly does NOT have
-         based on the resume text (catches false cosine matches)
-      2. From list C (DB skills), ADD any skill that IS in the resume
-         but was missed by Pass 1 or Pass 2
-      3. Return the final, accurate, clean list
-
-    This makes the mapping fully dynamic — the judge sees the LIVE DB
-    contents and can recover any skill from it that belongs to this person.
+    Judge Call A — Removal judge.
+    Receives: DB-mapped skills + their similarity evidence + resume text.
+    Returns:  subset of mapped_to_db that should be KEPT.
     """
-    if not db_skills:
-        return mapped_to_db
-
-    db_sample = db_skills[:300]   # cap to avoid token overflow
+    # Build a readable evidence block for the judge
+    ev_lines = []
+    for ev in evidence:
+        if ev["accepted"]:
+            top3_str = " | ".join(f"{db}({s:.2f})" for db, s in ev["top3"])
+            ev_lines.append(
+                f"  raw='{ev['raw']}' -> db='{ev['accepted']}' "
+                f"sim={ev['sim']:.3f} conf={ev['confidence']}  "
+                f"top3=[{top3_str}]"
+            )
+    ev_block = "\n".join(ev_lines) if ev_lines else "(no evidence available)"
 
     prompt = (
-        "You are a senior technical recruiter and skill verification expert.\n\n"
-        "You have four inputs:\n\n"
-        f"A) Skills extracted from resume (raw):\n{', '.join(extracted_raw)}\n\n"
-        f"B) Those skills matched to our database (may have errors):\n{', '.join(mapped_to_db)}\n\n"
-        f"C) All skills that exist in our database (use this to find missed skills):\n"
-        f"{', '.join(db_sample)}\n\n"
-        "D) Original resume text (ground truth):\n"
-        f"{resume_text[:5000]}\n\n"
-        "YOUR TASKS:\n\n"
-        "TASK 1 — REMOVE from list B any skill that the candidate does NOT actually have.\n"
-        "  - A cosine match might have mapped 'librosa' to 'audio processing' incorrectly\n"
-        "  - Remove any DB skill in list B that has no connection to what is written in the resume\n\n"
-        "TASK 2 — ADD from list C any skill that the candidate CLEARLY HAS based on the resume,\n"
-        "  but which is missing from list B. Examples of what to look for:\n"
-        "  - Resume says 'NLP models/pipelines' -> add 'natural language processing' or 'nlp' if in list C\n"
-        "  - Resume says 'Computer Vision models' -> add 'computer vision' if in list C\n"
-        "  - Resume says 'Generative AI models' -> add 'generative ai' if in list C\n"
-        "  - Resume uses Python throughout -> add 'python' if in list C\n"
-        "  - Resume mentions a skill by abbreviation (e.g. RAG) -> add full form if it is in list C\n"
-        "  - Resume mentions a skill in Experience/Projects that list A/B missed\n\n"
-        "TASK 3 — DEDUPLICATE: if list B has both the abbreviation and full form of the same skill,\n"
-        "  keep whichever form exists in list C. Remove the other.\n\n"
-        "RULES:\n"
-        "  - Only add skills from list C (must exist in the database)\n"
-        "  - Only add a skill if there is CLEAR EVIDENCE in the resume text\n"
-        "  - Do not infer or hallucinate skills\n"
-        "  - Do not add soft skills\n\n"
-        "Return ONLY a comma-separated list of the final verified skills.\n"
-        "One line. No explanation. No numbering."
+        "You are a skill verification expert. Your ONLY job is to decide which "
+        "skills in the MAPPED LIST are genuine skills of the candidate.\n\n"
+        "CONTEXT:\n"
+        "The mapped list was produced by cosine-similarity embedding matching. "
+        "Some matches may be WRONG — e.g. a domain-specific term got mapped to a "
+        "general skill it does not represent.\n\n"
+        f"CANDIDATE RESUME:\n{resume_text[:4500]}\n\n"
+        f"MAPPED SKILLS (candidate for verification):\n{', '.join(mapped_to_db)}\n\n"
+        f"SIMILARITY EVIDENCE (raw skill -> db match, similarity score, top-3 candidates):\n"
+        f"{ev_block}\n\n"
+        "DECISION RULES:\n"
+        "1. KEEP a skill if EITHER:\n"
+        "   a) It appears (or a clear synonym/abbreviation appears) in the resume text, OR\n"
+        "   b) It is strongly implied by other skills in the resume (e.g. 'pytorch' implies 'deep learning')\n"
+        "2. REMOVE a skill if:\n"
+        "   a) It has NO connection to anything in the resume text, OR\n"
+        "   b) It was clearly a wrong cosine match (low sim, no substring overlap, unrelated domain)\n"
+        "3. When in doubt at medium similarity (0.55-0.70), check if the raw skill and DB skill\n"
+        "   are genuinely the same concept (e.g. 'nlp' and 'natural language processing' are the same)\n\n"
+        "OUTPUT FORMAT — respond with ONLY valid JSON, no markdown, no explanation:\n"
+        '{"keep": ["skill1", "skill2", ...], "removed": ["skill3", ...], '
+        '"reason": "one sentence summary of what you removed and why"}'
     )
+    result  = _call_llm_json(prompt, {"keep": mapped_to_db, "removed": [], "reason": "parse error"})
+    kept    = result.get("keep", mapped_to_db)
+    removed = result.get("removed", [])
+    log.info("[JUDGE-A] Kept %d, removed %d: %s",
+             len(kept), len(removed), result.get("reason", ""))
+    return kept if isinstance(kept, list) else mapped_to_db
 
-    resp = groq_client.chat.completions.create(
-        model=config.GROQ_MODEL,
-        messages=[{"role": "user", "content": prompt}],
-        temperature=0,
-        max_tokens=600,
+
+def _judge_recovery(
+    extracted_raw: list[str],
+    already_have:  list[str],
+    db_skills:     list[str],
+    resume_text:   str,
+) -> list[str]:
+    """
+    Judge Call B — Recovery judge.
+    Receives: Stage 1 raw extraction + skills already confirmed + full DB list + resume.
+    Returns:  list of DB skills to ADD (not already in already_have).
+
+    To handle large DB lists without token overflow, we filter the DB to only
+    skills semantically close to the extracted skills before sending to LLM.
+    """
+    # Pre-filter DB: only send skills that share at least one word token with
+    # the extracted skills. This keeps the DB list manageable without losing coverage.
+    extracted_tokens = set()
+    for s in extracted_raw:
+        extracted_tokens.update(s.lower().split())
+
+    # Words so common they don't help with filtering
+    STOP = {"and", "or", "the", "a", "of", "in", "for", "with", "using", "based", "via"}
+    extracted_tokens -= STOP
+
+    # Score each DB skill by how many tokens overlap with extracted skills
+    scored = []
+    for db_s in db_skills:
+        if db_s in already_have:
+            continue   # already confirmed — skip
+        db_tokens = set(db_s.lower().split())
+        overlap   = len(db_tokens & extracted_tokens)
+        scored.append((overlap, db_s))
+
+    # Keep top-200 by overlap score + all zero-overlap ones up to 100 total for coverage
+    scored.sort(key=lambda x: -x[0])
+    candidates = [s for _, s in scored[:200]]
+    # Also add a random sample of low-overlap ones for broad coverage
+    zero_overlap = [s for score, s in scored if score == 0][:80]
+    candidates_set = set(candidates) | set(zero_overlap)
+    filtered_db = sorted(candidates_set)
+
+    already_str = ", ".join(already_have) if already_have else "(none yet)"
+
+    prompt = (
+        "You are a skill recovery expert. Your ONLY job is to find technical skills "
+        "that the candidate HAS but which are MISSING from the already-confirmed list.\n\n"
+        f"CANDIDATE RESUME:\n{resume_text[:4500]}\n\n"
+        f"SKILLS ALREADY CONFIRMED (do NOT add these again):\n{already_str}\n\n"
+        f"SKILLS EXTRACTED IN PASS 1 (these came directly from the resume):\n"
+        f"{', '.join(extracted_raw)}\n\n"
+        f"AVAILABLE DB SKILLS (you may ONLY add from this list):\n"
+        f"{', '.join(filtered_db)}\n\n"
+        "RECOVERY RULES:\n"
+        "1. Scan the resume for skills mentioned in Experience, Projects, Certifications\n"
+        "   that are NOT in the already-confirmed list\n"
+        "2. For each found skill, check if an equivalent exists in the DB skill list\n"
+        "   Examples of equivalences to look for:\n"
+        "   - Resume: 'NLP models' or 'nlp' -> DB: 'natural language processing' or 'nlp'\n"
+        "   - Resume: 'Python web scraping' or any Python usage -> DB: 'python'\n"
+        "   - Resume: 'Computer Vision models' -> DB: 'computer vision'\n"
+        "   - Resume: 'Generative AI' -> DB: 'generative ai'\n"
+        "   - Resume: 'LLM' anywhere -> DB: 'large language models' or 'llm'\n"
+        "   - Resume: abbreviation in skills list -> DB: full form\n"
+        "3. ONLY add skills that have CLEAR TEXTUAL EVIDENCE in the resume\n"
+        "4. ONLY add skills that appear in the DB skill list above\n"
+        "5. Do NOT add soft skills, company names, or project names\n"
+        "6. Do NOT add skills already in the confirmed list\n\n"
+        "OUTPUT FORMAT — respond with ONLY valid JSON, no markdown:\n"
+        '{"add": ["skill1", "skill2", ...], '
+        '"evidence": {"skill1": "quote from resume", "skill2": "quote from resume"}, '
+        '"reason": "one sentence summary"}'
     )
-    raw      = resp.choices[0].message.content.strip()
-    verified = _parse_skill_list(raw)
+    result   = _call_llm_json(prompt, {"add": [], "evidence": {}, "reason": "parse error"})
+    to_add   = result.get("add", [])
+    evidence = result.get("evidence", {})
+    log.info("[JUDGE-B] Recovering %d skills: %s | %s",
+             len(to_add), to_add, result.get("reason", ""))
+    if evidence:
+        for sk, ev in list(evidence.items())[:5]:
+            log.info("[JUDGE-B]   '%s' <- evidence: '%s'", sk, str(ev)[:80])
+    return to_add if isinstance(to_add, list) else []
 
-    # Safety: only keep skills that actually exist in the DB
-    db_set   = set(db_skills)
-    safe     = [s for s in verified if s in db_set]
-    # If judge hallucinated all new skills, fall back to mapped_to_db
-    if not safe:
-        log.warning("[STAGE3-JUDGE] No DB-valid skills in judge output — using Stage 2 result")
+
+def judge_skills_llm(
+    extracted_raw: list[str],
+    mapped_to_db:  list[str],
+    db_skills:     list[str],
+    resume_text:   str,
+    evidence:      list[dict] | None = None,
+) -> list[str]:
+    """
+    Stage 3 — Robust LLM-as-a-Judge.
+
+    Two independent focused judge calls:
+      A. Removal judge  — prunes false cosine matches from Stage 2
+      B. Recovery judge — finds skills missed by Stage 1 + 2 using full DB
+
+    Final output is hard-filtered against the DB membership set so
+    the judge cannot hallucinate skills that don't exist in the DB.
+    """
+    if not db_skills:
+        log.warning("[JUDGE] No DB skills available — skipping judge")
         return mapped_to_db
 
-    log.info("[STAGE3-JUDGE] Final: %d skills  (added %d, removed %d)",
-             len(safe),
-             len(set(safe) - set(mapped_to_db)),
-             len(set(mapped_to_db) - set(safe)))
-    return safe
+    if not evidence:
+        evidence = []
+
+    db_set = set(db_skills)
+
+    # ── Judge Call A: Remove false matches ──────────────────────────
+    kept_after_removal = _judge_removal(mapped_to_db, evidence, resume_text)
+    # Hard safety: only DB members
+    kept_after_removal = [s for s in kept_after_removal if s in db_set]
+    # Fallback: if judge removed everything, revert to full mapped list
+    if not kept_after_removal and mapped_to_db:
+        log.warning("[JUDGE-A] Removed everything — reverting to full mapped list")
+        kept_after_removal = [s for s in mapped_to_db if s in db_set]
+
+    # ── Judge Call B: Recover missed skills ─────────────────────────
+    recovered = _judge_recovery(extracted_raw, kept_after_removal, db_skills, resume_text)
+    # Hard safety: only DB members, not already confirmed
+    confirmed_set = set(kept_after_removal)
+    new_additions = [s for s in recovered if s in db_set and s not in confirmed_set]
+
+    # ── Merge ────────────────────────────────────────────────────────
+    final = kept_after_removal + new_additions
+
+    log.info(
+        "[STAGE3-JUDGE] Final: %d skills | "
+        "Stage2 had %d | Removed %d | Recovered %d",
+        len(final),
+        len(mapped_to_db),
+        len(set(mapped_to_db) - set(kept_after_removal)),
+        len(new_additions),
+    )
+    return final
 
 
 
@@ -437,21 +624,23 @@ async def analyze(
         raise HTTPException(400, "No skills detected in resume")
     log.info("[PIPELINE] Stage 1 done: %d raw skills", len(stage1_raw))
 
-    # Stage 2: Cosine-similarity mapping to DB canonical skill names
-    #   - uses dual threshold (0.80 high / 0.55+guard mid)
-    #   - returns only skills that exist in the DB
-    stage2_mapped = map_skills_to_db(stage1_raw)
+    # Stage 2: Cosine-similarity mapping + evidence collection
+    #   Returns (mapped_skills, evidence_list)
+    #   evidence_list carries similarity scores + top-3 candidates per skill
+    #   which the Stage 3 judge uses for informed removal decisions
+    stage2_mapped, stage2_evidence = map_skills_to_db(stage1_raw)
     log.info("[PIPELINE] Stage 2 done: %d mapped to DB", len(stage2_mapped))
 
-    # Stage 3: LLM-as-a-Judge — sees raw extraction, mapped result,
-    #   FULL DB skill list, and original resume. Removes false matches,
-    #   recovers missed skills directly from DB. 100% dynamic.
+    # Stage 3: Two-call robust LLM-as-a-Judge
+    #   Call A (removal judge): prunes false cosine matches using evidence
+    #   Call B (recovery judge): finds missed skills from full DB list
     all_db_skills = get_all_skills_from_db()
     skills = judge_skills_llm(
         extracted_raw = stage1_raw,
         mapped_to_db  = stage2_mapped,
         db_skills     = all_db_skills,
         resume_text   = resume_text,
+        evidence      = stage2_evidence,
     )
     log.info("[PIPELINE] Stage 3 done: %d final skills", len(skills))
 

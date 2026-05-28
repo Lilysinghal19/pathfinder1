@@ -4,6 +4,9 @@ voice_server.py — Run this alongside your Streamlit app:
 Runs on port 8765. Streamlit embeds it via iframe on port 8766.
 """
 
+import utils.http_session
+import utils.transport
+import utils.session
 import asyncio, json, tempfile, threading, queue, base64
 import numpy as np
 import scipy.io.wavfile as wav

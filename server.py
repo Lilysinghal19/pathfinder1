@@ -93,6 +93,58 @@ STATIC.mkdir(exist_ok=True)
 # HELPERS  (ported from oo.py)
 # ═════════════════════════════════════════════════════════════════════
 
+# ═════════════════════════════════════════════════════════════════════
+# TEXT EXTRACTION  (PDF + image)
+# ═════════════════════════════════════════════════════════════════════
+
+def extract_text_from_pdf(path: str) -> str:
+    """Try three PDF extraction strategies in order of reliability."""
+    # Strategy 1: PyMuPDF (fast, handles most PDFs)
+    try:
+        doc   = fitz.open(path)
+        pages = [page.get_text() for page in doc]
+        doc.close()
+        text  = "\n".join(pages).strip()
+        if len(text) >= 100:
+            return text
+    except Exception as e:
+        log.debug("[PDF] fitz failed: %s", e)
+
+    # Strategy 2: pdfplumber (better for complex layouts)
+    try:
+        with pdfplumber.open(path) as pdf:
+            text = "\n".join(p.extract_text() or "" for p in pdf.pages)
+        if len(text.strip()) >= 100:
+            return text.strip()
+    except Exception as e:
+        log.debug("[PDF] pdfplumber failed: %s", e)
+
+    # Strategy 3: OCR fallback for scanned PDFs
+    try:
+        doc   = fitz.open(path)
+        texts = []
+        for page in doc:
+            mat = fitz.Matrix(2, 2)
+            pix = page.get_pixmap(matrix=mat)
+            img = Image.open(io.BytesIO(pix.tobytes("png")))
+            texts.append(pytesseract.image_to_string(img, config="--psm 6"))
+        doc.close()
+        return "\n".join(texts).strip()
+    except Exception as e:
+        log.debug("[PDF] OCR fallback failed: %s", e)
+
+    return ""
+
+
+def extract_text_from_image(path: str) -> str:
+    """OCR extraction from image files."""
+    try:
+        return pytesseract.image_to_string(Image.open(path))
+    except Exception as e:
+        log.warning("[IMG] OCR failed: %s", e)
+        return ""
+
+
 # ─────────────────────────────────────────────────────────────────────
 # DYNAMIC SKILL EXTRACTION PIPELINE
 # 3-stage: Extract → Cosine-similarity DB mapping → LLM-as-Judge
@@ -355,24 +407,67 @@ def map_skills_to_db(extracted: list[str]) -> tuple[list[str], list[dict]]:
 
 def _call_llm_json(prompt: str, fallback: dict) -> dict:
     """
-    Call Groq LLM and parse JSON response robustly.
-    Falls back to `fallback` dict if response is not valid JSON.
+    Call Groq LLM expecting a JSON response. Returns fallback on any failure.
+
+    Hardened against:
+    - Groq API errors (quota, timeout, 5xx) — caught at request level
+    - LLM returning markdown-wrapped JSON (```json ... ```)
+    - LLM returning explanatory text before/after JSON object
+    - LLM returning an error string ("Internal Server Error" etc.)
+    - Malformed JSON (trailing commas, single quotes, truncated)
     """
     import json as _json, re as _re
     try:
         resp = groq_client.chat.completions.create(
             model=config.GROQ_MODEL,
-            messages=[{"role": "user", "content": prompt}],
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You are a JSON-only API. "
+                        "You MUST respond with valid JSON and nothing else. "
+                        "No markdown. No explanation. No preamble. "
+                        "Start your response with { and end with }."
+                    ),
+                },
+                {"role": "user", "content": prompt},
+            ],
             temperature=0,
             max_tokens=700,
         )
         raw = resp.choices[0].message.content.strip()
-        # Strip markdown code fences if present
-        raw = _re.sub(r"^```(?:json)?\s*", "", raw, flags=_re.M)
-        raw = _re.sub(r"```\s*$", "", raw, flags=_re.M).strip()
-        return _json.loads(raw)
     except Exception as e:
-        log.warning("[JUDGE] JSON parse failed (%s) — using fallback", e)
+        log.warning("[JUDGE] LLM API call failed (%s) — using fallback", e)
+        return fallback
+
+    # Strip markdown code fences
+    raw = _re.sub(r"^```(?:json)?\s*", "", raw, flags=_re.M)
+    raw = _re.sub(r"```\s*$",           "", raw, flags=_re.M).strip()
+
+    # If the response doesn't look like JSON at all, bail immediately
+    if not raw.startswith("{"):
+        log.warning("[JUDGE] Non-JSON response (starts with %r) — fallback", raw[:40])
+        return fallback
+
+    # Extract the first complete JSON object (ignore trailing text)
+    depth, end = 0, -1
+    for idx, ch in enumerate(raw):
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                end = idx + 1
+                break
+    if end == -1:
+        log.warning("[JUDGE] Could not find closing } — fallback")
+        return fallback
+    raw = raw[:end]
+
+    try:
+        return _json.loads(raw)
+    except _json.JSONDecodeError as e:
+        log.warning("[JUDGE] JSON decode error (%s) on: %r — fallback", e, raw[:120])
         return fallback
 
 

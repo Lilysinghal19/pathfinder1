@@ -561,11 +561,20 @@ async function runAnalysis() {
     clearInterval(stepInterval);
     steps.forEach(s => setStep(s,'done'));
 
+    // Read body as text first — resp.json() throws if server returned HTML error page
+    const bodyText = await resp.text();
     if (!resp.ok) {
-      const err = await resp.json();
-      throw new Error(err.detail || 'Analysis failed');
+      let detail = 'Analysis failed (HTTP ' + resp.status + ')';
+      try { detail = JSON.parse(bodyText).detail || detail; } catch(_) {
+        // Server returned non-JSON error (e.g. 500 HTML page) — show raw start
+        detail = bodyText.slice(0, 200).replace(/<[^>]+>/g, '').trim() || detail;
+      }
+      throw new Error(detail);
     }
-    const data = await resp.json();
+    let data;
+    try { data = JSON.parse(bodyText); } catch(e) {
+      throw new Error('Server returned invalid response. Check terminal for errors.');
+    }
     state.sessionId   = data.session_id;
     state.analysisData = data;
     renderResults(data);
